@@ -201,4 +201,9 @@ if(AMPAAC_TESTS AND AMPAAC_PLATFORM MATCHES "^(OSX|LINUX)$")
     if(NOT APPLE)
         target_link_libraries(ampaac_test PRIVATE m)
     endif()
+
+    # Drives a real FMOD library (loaded at run time) with the codec registered: test/fmod_harness.c.
+    add_executable(fmod_harness test/fmod_harness.c)
+    target_include_directories(fmod_harness PRIVATE "${FMOD_API_INC}")
+    target_link_libraries(fmod_harness PRIVATE ${CMAKE_DL_LIBS})
 endif()

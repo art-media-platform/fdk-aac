@@ -21,6 +21,8 @@ typedef struct fake_file {
     unsigned int               reads;
     int                        sampleRateTags;
     float                      lastSampleRate;
+    int                        lengthTags;       /* AMPAAC_LENGTH_TAG count and last value (ms) */
+    unsigned int               lengthTagMs;
 } fake_file;
 
 void fake_file_init(fake_file* file, const unsigned char* data, unsigned int size);

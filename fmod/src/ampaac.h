@@ -10,13 +10,17 @@
 
 #define AMPAAC_PROBE_BYTES   8192u     /* head window searched for an ADTS sync */
 #define AMPAAC_READ_BUF      16384u    /* reader read-ahead window */
+#define AMPAAC_READ_GRANULE  4096u     /* smallest FMOD file read */
 #define AMPAAC_MAX_AU        8192u     /* largest access unit fed to the decoder (ADTS frame_length < 8192) */
 #define AMPAAC_MAX_CHANNELS  8
 #define AMPAAC_MAX_FRAME     4096      /* largest decoded frame (USAC); HE-AAC is 2048 */
 #define AMPAAC_PCM_CAP       (AMPAAC_MAX_FRAME * AMPAAC_MAX_CHANNELS * 2)
 #define AMPAAC_OPEN_AUS      3         /* access units decoded at open to learn the output format */
 #define AMPAAC_PREROLL_AUS   3         /* access units decoded and dropped ahead of a seek target */
-#define AMPAAC_EXACT_AHEAD_SECONDS 60  /* ADTS: decode forward from the last index anchor up to this far */
+#define AMPAAC_READ_THROUGH  262144u   /* forward jumps up to this far are read through, not seeked */
+#define AMPAAC_HOP_BUDGET_MS 100u      /* ADTS: time a seek may spend walking frame headers */
+#define AMPAAC_LENGTH_TAG    "AMPAAC_LENGTH_MS"   /* FMOD_TAGTYPE_USER, INT: length estimate for a stream
+                                                     FMOD reports as unknown length */
 #define AMPAAC_UNKNOWN       0xFFFFFFFFu
 
 /* Reader over FMOD's codec file functions: a read-ahead window positioned anywhere in the file. */
@@ -79,7 +83,9 @@ typedef struct ampaac_codec {
     /* Decode position. */
     unsigned int          decodedPcm;    /* PCM position of the next decoded frame's first sample */
     unsigned int          lengthPcm;     /* current length estimate, AMPAAC_UNKNOWN if none */
-    int                   lengthExact;   /* lengthPcm is the decoded end, not an estimate */
+    int                   lengthExact;   /* lengthPcm is the true end, not an estimate */
+    unsigned int          publishedMs;   /* last AMPAAC_LENGTH_TAG value sent, 0 if none */
+    unsigned int          framesSincePublish;
     unsigned int          discard;       /* PCM frames still to drop (seek pre-roll and in-frame offset) */
     unsigned int          decodeFlags;   /* flags for the next aacDecoder_DecodeFrame */
     int                   exhausted;     /* no more access units */
@@ -111,6 +117,11 @@ FMOD_RESULT ampaac_adts_open(ampaac_codec* aac);
 /* Next access unit at the read position; returns FMOD_OK, FMOD_ERR_FILE_EOF at the end, or a file error. */
 FMOD_RESULT ampaac_adts_next(ampaac_codec* aac, unsigned int* auLen);
 FMOD_RESULT ampaac_adts_seek(ampaac_codec* aac, unsigned int targetPcm);
-void        ampaac_adts_update_length(ampaac_codec* aac);
+void        ampaac_adts_reset_index(ampaac_codec* aac);
+void        ampaac_adts_estimate_length(ampaac_codec* aac);
+void        ampaac_adts_walk_to_end(ampaac_codec* aac);
+
+/* Seek walk budget; tests lower it to exercise the estimate path. */
+extern unsigned int ampaac_hop_budget_ms;
 
 #endif

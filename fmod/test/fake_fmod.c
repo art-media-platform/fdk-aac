@@ -20,6 +20,11 @@ static FMOD_RESULT F_CALLBACK fake_metadata(FMOD_CODEC_STATE* state, FMOD_TAGTYP
         memcpy(&file->lastSampleRate, data, sizeof(float));
         file->sampleRateTags++;
     }
+    if (type == FMOD_TAGTYPE_USER && strcmp(name, "AMPAAC_LENGTH_MS") == 0
+        && datatype == FMOD_TAGDATATYPE_INT && len == sizeof(unsigned int)) {
+        memcpy(&file->lengthTagMs, data, sizeof(unsigned int));
+        file->lengthTags++;
+    }
     return FMOD_OK;
 }
 

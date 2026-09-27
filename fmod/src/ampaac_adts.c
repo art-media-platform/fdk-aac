@@ -1,17 +1,37 @@
 /*
- * ampaac — ADTS container: probe, frame walk, resync, sparse seek index and length estimate.
+ * ampaac — ADTS container: probe, frame walk, resync, seek index and length estimate.
  *
- * Frames are fed to the decoder one at a time, so each frame's file offset maps exactly to the PCM
- * position of its first output sample while decoding runs continuously from an exact anchor.
+ * ADTS carries no index, and FMOD ends a stream at the length declared at open (padding silence or cutting
+ * the tail), so ADTS declares its length unknown and FMOD ends at the decoder's EOF. The seek index maps
+ * file offsets to PCM exactly: frames are fed one at a time while decoding, and a seek walks frame headers
+ * forward (no decode) within a time budget. Past what is walked, positions are estimated.
  */
 #include <string.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <time.h>
+#endif
 
 #include "ampaac.h"
 
 #define ADTS_MIN_HEADER   7u
 #define ADTS_CHAIN        3u      /* consecutive frames that establish sync */
-#define INDEX_CAP         4096u   /* entries; halved (stride doubled) when full */
-#define INDEX_STRIDE      8u      /* initial frames between entries */
+#define INDEX_CAP         4096u   /* anchors; halved (stride doubled) when full */
+#define INDEX_STRIDE      8u      /* initial frames between anchors */
+
+unsigned int ampaac_hop_budget_ms = AMPAAC_HOP_BUDGET_MS;
+
+static double clock_ms(void) {
+#if defined(_WIN32)
+    return (double)GetTickCount64();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
+#endif
+}
 
 int ampaac_adts_parse(const unsigned char* p, unsigned int avail, ampaac_adts_header* hdr) {
     unsigned int protectionAbsent;
@@ -79,15 +99,10 @@ long ampaac_adts_find_sync(const unsigned char* buf, unsigned int len, unsigned 
     return -1;
 }
 
-static void index_add(ampaac_codec* aac, unsigned int offset) {
-    if (aac->framesSinceIndex != 0) {
-        aac->framesSinceIndex = (aac->framesSinceIndex + 1) % aac->indexStride;
-        return;
-    }
-    aac->framesSinceIndex = 1 % aac->indexStride;
-
+/* Adds an exact anchor past the last one; when full, keeps every other anchor and doubles the stride. */
+static void index_append(ampaac_codec* aac, unsigned int offset, unsigned int pcm) {
     if (aac->indexLen > 0 && aac->index[aac->indexLen - 1].offset >= offset) {
-        return;   /* re-decoding an indexed region after a seek back */
+        return;
     }
     if (aac->indexLen == aac->indexCap) {
         unsigned int keep;
@@ -98,12 +113,26 @@ static void index_add(ampaac_codec* aac, unsigned int offset) {
         aac->indexStride *= 2;
     }
     aac->index[aac->indexLen].offset = offset;
-    aac->index[aac->indexLen].pcm    = aac->decodedPcm;
+    aac->index[aac->indexLen].pcm    = pcm;
     aac->indexLen++;
 }
 
-/* Scans forward from the read position for a chained sync and moves the reader onto it. */
-static FMOD_RESULT resync(ampaac_codec* aac) {
+static const ampaac_index_entry* last_anchor(const ampaac_codec* aac) {
+    return &aac->index[aac->indexLen - 1];
+}
+
+void ampaac_adts_reset_index(ampaac_codec* aac) {
+    /* The first frame is an exact anchor before anything decodes: FMOD seeks to 0 right after open. */
+    aac->index[0].offset  = aac->dataStart;
+    aac->index[0].pcm     = 0;
+    aac->indexLen         = 1;
+    aac->indexStride      = INDEX_STRIDE;
+    aac->framesSinceIndex = 1;
+}
+
+/* Scans forward for a chained sync and moves the reader onto it. `from` is 1 when the frame at the read
+   position already failed, 0 when the read position itself may start a chain (a seek landing). */
+static FMOD_RESULT resync(ampaac_codec* aac, unsigned int from) {
     ampaac_reader* rd = &aac->reader;
 
     for (;;) {
@@ -112,15 +141,15 @@ static FMOD_RESULT resync(ampaac_codec* aac) {
         int                  endIsEOF = rd->atEnd && rd->fault == FMOD_OK;
         long                 found;
 
-        if (avail < ADTS_MIN_HEADER) {
+        if (avail < ADTS_MIN_HEADER + from) {
             return rd->fault != FMOD_OK ? rd->fault : FMOD_ERR_FILE_EOF;
         }
-        /* Start at 1: the frame at the read position already failed. */
-        found = ampaac_adts_find_sync(window + 1, avail - 1, ADTS_CHAIN, endIsEOF);
+        found = ampaac_adts_find_sync(window + from, avail - from, ADTS_CHAIN, endIsEOF);
         if (found >= 0) {
-            ampaac_reader_skip(rd, (unsigned int)found + 1);
+            ampaac_reader_skip(rd, (unsigned int)found + from);
             return FMOD_OK;
         }
+        from = 1;
         if (endIsEOF || rd->fault != FMOD_OK) {
             ampaac_reader_skip(rd, avail);
             return rd->fault != FMOD_OK ? rd->fault : FMOD_ERR_FILE_EOF;
@@ -149,7 +178,7 @@ FMOD_RESULT ampaac_adts_open(ampaac_codec* aac) {
         return FMOD_ERR_FORMAT;
     }
 
-    /* Mean frame size over every whole frame in the head window seeds the length estimate. */
+    /* Mean frame size over the head window seeds the length estimate until the index outgrows it. */
     at = (unsigned int)found;
     while (at + ADTS_MIN_HEADER <= avail && ampaac_adts_parse(head + at, avail - at, &hdr)
            && at + hdr.frameLength <= avail) {
@@ -161,11 +190,11 @@ FMOD_RESULT ampaac_adts_open(ampaac_codec* aac) {
     aac->dataStart      = rd->pos + (unsigned int)found;
     aac->meanFrameBytes = frames ? bytes / frames : 0;
     aac->indexCap       = INDEX_CAP;
-    aac->indexStride    = INDEX_STRIDE;
     aac->index          = (ampaac_index_entry*)FMOD_CODEC_ALLOC(rd->codec, INDEX_CAP * sizeof(ampaac_index_entry), 16);
     if (!aac->index) {
         return FMOD_ERR_MEMORY;
     }
+    ampaac_adts_reset_index(aac);
     return ampaac_reader_seek(rd, aac->dataStart);
 }
 
@@ -196,12 +225,13 @@ FMOD_RESULT ampaac_adts_next(ampaac_codec* aac, unsigned int* auLen) {
                 if (aac->exact || nextOK || endsHere) {
                     memcpy(aac->au, p, hdr.frameLength);
                     *auLen = hdr.frameLength;
+                    aac->pcmPerFrame = (unsigned int)aac->frameSize * hdr.rawBlocks;
                     if (aac->exact) {
-                        index_add(aac, offset);
+                        if (aac->framesSinceIndex == 0) {
+                            index_append(aac, offset, aac->decodedPcm);
+                        }
+                        aac->framesSinceIndex = (aac->framesSinceIndex + 1) % aac->indexStride;
                     }
-                    aac->feedBytes  += hdr.frameLength;
-                    aac->feedFrames += 1;
-                    aac->pcmPerFrame = aac->frameSize > 0 ? (unsigned int)aac->frameSize * hdr.rawBlocks : 0;
                     ampaac_reader_skip(rd, hdr.frameLength);
                     return FMOD_OK;
                 }
@@ -214,32 +244,93 @@ FMOD_RESULT ampaac_adts_next(ampaac_codec* aac, unsigned int* auLen) {
 
         /* Lost sync: bytes are skipped, so positions past this point are estimates. */
         aac->exact = 0;
-        res = resync(aac);
+        res = resync(aac, 1);
         if (res != FMOD_OK) {
             return res;
         }
     }
 }
 
-void ampaac_adts_update_length(ampaac_codec* aac) {
-    unsigned int size = aac->reader.size;
-    unsigned int mean;
-    unsigned long long frames;
-    unsigned long long pcm;
+/*
+ * Walks frame headers from the last anchor toward `target` without decoding, adding anchors. Stops at the
+ * frame that holds `target`, at the end of the stream, where the chain breaks, or when `budgetMs` runs out
+ * (a still-pulling blob reads slowly; a far seek then estimates rather than waiting on the pull).
+ */
+static void hop_toward(ampaac_codec* aac, unsigned int target, unsigned int budgetMs) {
+    ampaac_reader*     rd = &aac->reader;
+    ampaac_index_entry at = *last_anchor(aac);
+    double             deadline = clock_ms() + budgetMs;
+    unsigned int       frames = 0;
+
+    if (ampaac_reader_seek(rd, at.offset) != FMOD_OK) {
+        return;
+    }
+    for (;;) {
+        const unsigned char* p;
+        unsigned int         avail = ampaac_reader_peek(rd, ADTS_MIN_HEADER, &p);
+        ampaac_adts_header   hdr;
+        unsigned int         framePcm;
+
+        if (avail < ADTS_MIN_HEADER) {
+            if (rd->atEnd && rd->fault == FMOD_OK && rd->pos == at.offset) {
+                /* Walked to the end: the length is exact. */
+                aac->lengthPcm   = at.pcm;
+                aac->lengthExact = 1;
+            }
+            break;
+        }
+        if (!ampaac_adts_parse(p, avail, &hdr)) {
+            break;
+        }
+        framePcm = (unsigned int)aac->frameSize * hdr.rawBlocks;
+        if (at.pcm + framePcm > target) {
+            break;
+        }
+        if (ampaac_reader_peek(rd, hdr.frameLength, &p) < hdr.frameLength) {
+            break;   /* truncated final frame */
+        }
+        ampaac_reader_skip(rd, hdr.frameLength);
+        at.offset += hdr.frameLength;
+        at.pcm    += framePcm;
+        if (++frames % aac->indexStride == 0) {
+            index_append(aac, at.offset, at.pcm);
+        }
+        if ((frames & 15) == 0 && clock_ms() > deadline) {
+            break;
+        }
+    }
+    index_append(aac, at.offset, at.pcm);
+}
+
+void ampaac_adts_walk_to_end(ampaac_codec* aac) {
+    hop_toward(aac, AMPAAC_UNKNOWN, 0xFFFFFFFFu);
+}
+
+/* Mean frame size over the exactly walked region once it holds enough frames, else the head window's. */
+static unsigned int mean_frame_bytes(const ampaac_codec* aac) {
+    const ampaac_index_entry* last = last_anchor(aac);
+    unsigned int              frames = aac->pcmPerFrame ? last->pcm / aac->pcmPerFrame : 0;
+
+    if (frames >= 64) {
+        return (last->offset - aac->dataStart + frames / 2) / frames;
+    }
+    return aac->meanFrameBytes;
+}
+
+void ampaac_adts_estimate_length(ampaac_codec* aac) {
+    unsigned int              size = aac->reader.size;
+    unsigned int              mean = mean_frame_bytes(aac);
+    const ampaac_index_entry* last = last_anchor(aac);
+    unsigned long long        pcm;
 
     if (aac->lengthExact) {
         return;
     }
-    if (aac->feedFrames >= 32) {
-        aac->meanFrameBytes = (unsigned int)(aac->feedBytes / aac->feedFrames);
-    }
-    mean = aac->meanFrameBytes;
-    if (size == AMPAAC_UNKNOWN || mean == 0 || aac->pcmPerFrame == 0 || size <= aac->dataStart) {
-        aac->lengthPcm = AMPAAC_UNKNOWN;
+    if (size == AMPAAC_UNKNOWN || mean == 0 || aac->pcmPerFrame == 0 || size <= last->offset) {
+        aac->lengthPcm = size == AMPAAC_UNKNOWN ? AMPAAC_UNKNOWN : last->pcm;
         return;
     }
-    frames = ((unsigned long long)(size - aac->dataStart) + mean / 2) / mean;
-    pcm    = frames * aac->pcmPerFrame;
+    pcm = last->pcm + ((unsigned long long)(size - last->offset) + mean / 2) / mean * aac->pcmPerFrame;
     if (pcm < aac->decodedPcm) {
         pcm = aac->decodedPcm;
     }
@@ -247,16 +338,19 @@ void ampaac_adts_update_length(ampaac_codec* aac) {
 }
 
 FMOD_RESULT ampaac_adts_seek(ampaac_codec* aac, unsigned int targetPcm) {
-    ampaac_reader* rd = &aac->reader;
-    unsigned int   preroll = AMPAAC_PREROLL_AUS * aac->pcmPerFrame;
-    unsigned int   start = targetPcm > preroll ? targetPcm - preroll : 0;
-    unsigned int   lastAnchor = aac->indexLen ? aac->index[aac->indexLen - 1].pcm : 0;
-    unsigned int   decodeAhead = (unsigned int)aac->sampleRate * AMPAAC_EXACT_AHEAD_SECONDS;
-    FMOD_RESULT    res;
+    ampaac_reader*            rd = &aac->reader;
+    unsigned int              preroll = AMPAAC_PREROLL_AUS * aac->pcmPerFrame;
+    unsigned int              start = targetPcm > preroll ? targetPcm - preroll : 0;
+    const ampaac_index_entry* last;
+    FMOD_RESULT               res;
 
-    /* An anchor before start is exact by construction; decoding forward from it stays exact, so a target
-       up to decodeAhead past the last anchor is reached exactly rather than estimated. */
-    if (aac->indexLen > 0 && start <= lastAnchor + decodeAhead) {
+    if (start >= last_anchor(aac)->pcm + aac->pcmPerFrame) {
+        hop_toward(aac, start, ampaac_hop_budget_ms);
+    }
+    last = last_anchor(aac);
+
+    if (start < last->pcm + aac->pcmPerFrame) {
+        /* Exact: the last anchor at or before start. */
         unsigned int lo = 0;
         unsigned int hi = aac->indexLen - 1;
         while (lo < hi) {
@@ -273,27 +367,30 @@ FMOD_RESULT ampaac_adts_seek(ampaac_codec* aac, unsigned int targetPcm) {
         }
         aac->decodedPcm       = aac->index[lo].pcm;
         aac->exact            = 1;
-        aac->framesSinceIndex = 1 % aac->indexStride;   /* the anchor frame is already indexed */
-    } else {
-        /* Past the exact region: land by the mean frame size, then resync. */
-        unsigned long long frames = aac->pcmPerFrame ? start / aac->pcmPerFrame : 0;
-        unsigned long long offset = aac->dataStart + frames * aac->meanFrameBytes;
+        aac->framesSinceIndex = 1;   /* the anchor frame is indexed already */
+        return FMOD_OK;
+    }
+
+    /* Past the walk budget: land by the mean frame size from the furthest exact anchor, then resync. */
+    {
+        unsigned int       mean = mean_frame_bytes(aac);
+        unsigned long long frames = (start - last->pcm) / aac->pcmPerFrame;
+        unsigned long long offset = last->offset + frames * mean;
         unsigned long long landed;
 
-        if (aac->reader.size != AMPAAC_UNKNOWN && offset >= aac->reader.size) {
-            offset = aac->reader.size;
+        if (rd->size != AMPAAC_UNKNOWN && offset >= rd->size) {
+            offset = rd->size;
         }
         res = ampaac_reader_seek(rd, (unsigned int)offset);
         if (res != FMOD_OK) {
             return res;
         }
-        res = resync(aac);
+        res = resync(aac, 0);
         if (res != FMOD_OK && res != FMOD_ERR_FILE_EOF) {
             return res;
         }
-        landed = aac->meanFrameBytes && rd->pos > aac->dataStart
-               ? ((unsigned long long)(rd->pos - aac->dataStart) + aac->meanFrameBytes / 2) / aac->meanFrameBytes * aac->pcmPerFrame
-               : 0;
+        landed = mean ? last->pcm + ((unsigned long long)(rd->pos - last->offset) + mean / 2) / mean * aac->pcmPerFrame
+                      : last->pcm;
         aac->decodedPcm = landed > targetPcm ? targetPcm : (unsigned int)landed;
         aac->exact      = 0;
     }

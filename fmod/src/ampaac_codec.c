@@ -3,6 +3,11 @@
  *
  * FMOD opens every sound through its codec list in priority order; open() claims only streams it can
  * decode and answers FMOD_ERR_FORMAT for everything else, leaving no side effects.
+ *
+ * Length. FMOD 2.03 ends a stream at the lengthpcm declared at open: it pads silence when the data ends
+ * sooner and cuts the tail when it ends later, and it never re-reads the length or calls getlength. So a
+ * stream declares its length only when the length is exact; otherwise it declares it unknown, FMOD ends at
+ * the decoder's EOF, and the running estimate travels as AMPAAC_LENGTH_TAG for the player's duration.
  */
 #include <string.h>
 #include <stdlib.h>
@@ -14,10 +19,12 @@
 #define AMPAAC_SOURCE_REV "unknown"
 #endif
 
+#define PUBLISH_EVERY_AUS 256   /* re-publish a moving length estimate at most this often */
+
 static const char ampaacIdent[] = "ampaac fdk-aac " AMPAAC_SOURCE_REV;
 
 #ifdef AMPAAC_SPIKE
-/* Spike builds trace the callbacks FMOD makes and can skew the reported length (AMPAAC_LENGTH_SCALE). */
+/* Spike builds trace the callbacks FMOD makes (fmod_harness). */
 #define TRACE(...) do { fprintf(stderr, "ampaac: " __VA_ARGS__); fputc('\n', stderr); } while (0)
 #else
 #define TRACE(...) do { } while (0)
@@ -28,7 +35,6 @@ static const char ampaacIdent[] = "ampaac fdk-aac " AMPAAC_SOURCE_REV;
 static FMOD_RESULT F_CALLBACK codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode, FMOD_CREATESOUNDEXINFO* exinfo);
 static FMOD_RESULT F_CALLBACK codec_close(FMOD_CODEC_STATE* state);
 static FMOD_RESULT F_CALLBACK codec_read(FMOD_CODEC_STATE* state, void* buffer, unsigned int samplesIn, unsigned int* samplesOut);
-static FMOD_RESULT F_CALLBACK codec_getlength(FMOD_CODEC_STATE* state, unsigned int* length, FMOD_TIMEUNIT unit);
 static FMOD_RESULT F_CALLBACK codec_setposition(FMOD_CODEC_STATE* state, int subsound, unsigned int position, FMOD_TIMEUNIT unit);
 
 static FMOD_CODEC_DESCRIPTION ampaacDescription = {
@@ -40,7 +46,7 @@ static FMOD_CODEC_DESCRIPTION ampaacDescription = {
     codec_open,
     codec_close,
     codec_read,
-    codec_getlength,
+    0,                   /* getlength: FMOD 2.03 never calls it; lengthpcm is read once at open */
     codec_setposition,
     0,                   /* getposition: FMOD tracks position */
     0,                   /* soundcreate */
@@ -98,14 +104,6 @@ static int foreign_magic(const unsigned char* p, unsigned int avail) {
     return 0;
 }
 
-static FMOD_RESULT next_au(ampaac_codec* aac, unsigned int* auLen) {
-    return ampaac_adts_next(aac, auLen);
-}
-
-static void update_length(ampaac_codec* aac) {
-    ampaac_adts_update_length(aac);
-}
-
 static void channel_mask(ampaac_codec* aac) {
     switch (aac->channels) {
         case 1:  aac->waveformat.channelmask = FMOD_CHANNELMASK_MONO;    break;
@@ -114,6 +112,42 @@ static void channel_mask(ampaac_codec* aac) {
         case 8:  aac->waveformat.channelmask = FMOD_CHANNELMASK_7POINT1; break;
         default: aac->waveformat.channelmask = 0;                        break;
     }
+}
+
+/* Sends the length estimate as AMPAAC_LENGTH_TAG when it moved by half a second or became exact. */
+static void publish_length(FMOD_CODEC_STATE* state, ampaac_codec* aac) {
+    unsigned int ms;
+    unsigned int moved;
+
+    aac->framesSincePublish = 0;
+    ampaac_adts_estimate_length(aac);
+    if (aac->lengthPcm == AMPAAC_UNKNOWN || aac->sampleRate <= 0) {
+        return;
+    }
+    ms    = (unsigned int)((unsigned long long)aac->lengthPcm * 1000u / (unsigned int)aac->sampleRate);
+    moved = ms > aac->publishedMs ? ms - aac->publishedMs : aac->publishedMs - ms;
+    if (aac->publishedMs != 0 && moved < 500 && !aac->lengthExact) {
+        return;
+    }
+    if (ms == aac->publishedMs) {
+        return;
+    }
+    aac->publishedMs = ms;
+    FMOD_CODEC_METADATA(state, FMOD_TAGTYPE_USER, (char*)AMPAAC_LENGTH_TAG, &ms, sizeof(ms), FMOD_TAGDATATYPE_INT, 1);
+    TRACE("length tag %u ms%s", ms, aac->lengthExact ? " (exact)" : "");
+}
+
+static FMOD_RESULT feed_next_au(ampaac_codec* aac) {
+    unsigned int auLen = 0;
+    FMOD_RESULT  res = ampaac_adts_next(aac, &auLen);
+
+    if (res == FMOD_OK) {
+        UCHAR* ptr   = aac->au;
+        UINT   size  = auLen;
+        UINT   valid = auLen;
+        aacDecoder_Fill(aac->decoder, &ptr, &size, &valid);
+    }
+    return res;
 }
 
 /*
@@ -133,37 +167,31 @@ static FMOD_RESULT decode_next(FMOD_CODEC_STATE* state, ampaac_codec* aac) {
         err = aacDecoder_DecodeFrame(aac->decoder, aac->pcm, AMPAAC_PCM_CAP, flags);
 
         if (err == AAC_DEC_NOT_ENOUGH_BITS && !conceal) {
-            unsigned int auLen = 0;
-            FMOD_RESULT  res;
+            FMOD_RESULT res;
 
             /* Encoders pad the last frame, so no AACDEC_FLUSH drain: the decoded count stays the
-               frame count times the frame size, which is what the length reports. */
+               frame count times the frame size. */
             if (aac->exhausted) {
                 return FMOD_ERR_FILE_EOF;
             }
-            res = next_au(aac, &auLen);
+            res = feed_next_au(aac);
             if (res == FMOD_ERR_FILE_EOF) {
                 aac->exhausted = 1;
                 if (aac->exact) {
                     aac->lengthPcm   = aac->decodedPcm;   /* the true end is known now */
                     aac->lengthExact = 1;
+                    publish_length(state, aac);
                 }
                 continue;
             }
             if (res != FMOD_OK) {
                 return res;
             }
-            {
-                UCHAR* ptr   = aac->au;
-                UINT   size  = auLen;
-                UINT   valid = auLen;
-                aacDecoder_Fill(aac->decoder, &ptr, &size, &valid);
-            }
             continue;
         }
 
         if (err != AAC_DEC_NOT_ENOUGH_BITS) {
-            aac->decodeFlags = 0;   /* AACDEC_INTR takes effect only on a decode that found its bits */
+            aac->decodeFlags = 0;
         }
         if (!IS_OUTPUT_VALID(err)) {
             if (IS_INIT_ERROR(err) || err == AAC_DEC_OUT_OF_MEMORY || err == AAC_DEC_INVALID_HANDLE
@@ -200,6 +228,9 @@ static FMOD_RESULT decode_next(FMOD_CODEC_STATE* state, ampaac_codec* aac) {
 
         frames = (unsigned int)info->frameSize;
         aac->decodedPcm += frames;
+        if (++aac->framesSincePublish >= PUBLISH_EVERY_AUS) {
+            publish_length(state, aac);
+        }
         if (aac->discard >= frames) {
             aac->discard -= frames;
             continue;
@@ -211,24 +242,32 @@ static FMOD_RESULT decode_next(FMOD_CODEC_STATE* state, ampaac_codec* aac) {
     }
 }
 
-static HANDLE_AACDECODER open_decoder(TRANSPORT_TYPE transport, int channels) {
+static HANDLE_AACDECODER open_decoder(TRANSPORT_TYPE transport) {
     HANDLE_AACDECODER decoder = aacDecoder_Open(transport, 1);
 
-    if (!decoder) {
-        return 0;
-    }
-    /* fdk normalizes to -24 dBFS by default (targetRefLevel 96), which attenuates streams carrying a program
-       reference level; -1 decodes at the encoded level, like every other FMOD codec. */
-    aacDecoder_SetParam(decoder, AAC_DRC_REFERENCE_LEVEL, -1);
-    if (channels > 0) {
-        aacDecoder_SetParam(decoder, AAC_PCM_MIN_OUTPUT_CHANNELS, channels);
-        aacDecoder_SetParam(decoder, AAC_PCM_MAX_OUTPUT_CHANNELS, channels);
+    if (decoder) {
+        /* fdk normalizes to -24 dBFS by default (targetRefLevel 96), which attenuates streams carrying a
+           program reference level; -1 decodes at the encoded level, like every other FMOD codec. */
+        aacDecoder_SetParam(decoder, AAC_DRC_REFERENCE_LEVEL, -1);
     }
     return decoder;
 }
 
+/* Decoding restarts: from the first frame the probe frames' filter state must not bleed in (AACDEC_CLRHIST,
+   which also resets SBR to wait for a header, and the first frame carries one). Mid-stream nothing is
+   flagged: AACDEC_INTR and AACDEC_CLRHIST both drop SBR/PS to upsampling-only until the stream's next SBR
+   header (libSBRdec sbrdecoder.cpp SBR_BS_INTERRUPTION, SBRDEC_FORCE_RESET), ~0.8 s of dull, narrow
+   audio; the configuration is unchanged across a seek and the pre-roll rebuilds frame-to-frame state. */
+static void restart_decode(ampaac_codec* aac) {
+    aacDecoder_SetParam(aac->decoder, AAC_TPDEC_CLEAR_BUFFER, 1);
+    aac->decodeFlags = aac->exact && aac->decodedPcm == 0 ? AACDEC_CLRHIST : 0;
+    aac->pcmFrames   = 0;
+    aac->pcmNext     = 0;
+    aac->exhausted   = 0;
+}
+
 /* Decodes the first access units to learn the output format (implicit SBR/PS changes rate and channels). */
-static FMOD_RESULT learn_format(FMOD_CODEC_STATE* state, ampaac_codec* aac) {
+static FMOD_RESULT learn_format(ampaac_codec* aac) {
     int decoded = 0;
     int attempts;
 
@@ -237,19 +276,12 @@ static FMOD_RESULT learn_format(FMOD_CODEC_STATE* state, ampaac_codec* aac) {
         CStreamInfo*      info;
 
         if (err == AAC_DEC_NOT_ENOUGH_BITS) {
-            unsigned int auLen = 0;
-            FMOD_RESULT  res = next_au(aac, &auLen);
+            FMOD_RESULT res = feed_next_au(aac);
             if (res == FMOD_ERR_FILE_EOF) {
                 break;
             }
             if (res != FMOD_OK) {
                 return res;
-            }
-            {
-                UCHAR* ptr   = aac->au;
-                UINT   size  = auLen;
-                UINT   valid = auLen;
-                aacDecoder_Fill(aac->decoder, &ptr, &size, &valid);
             }
             continue;
         }
@@ -269,16 +301,21 @@ static FMOD_RESULT learn_format(FMOD_CODEC_STATE* state, ampaac_codec* aac) {
         decoded++;
     }
     if (decoded == 0 || aac->channels > AMPAAC_MAX_CHANNELS) {
-        (void)state;
         return FMOD_ERR_FORMAT;
     }
     return FMOD_OK;
+}
+
+static FMOD_RESULT fail_open(FMOD_CODEC_STATE* state, FMOD_RESULT res) {
+    codec_close(state);
+    return res;
 }
 
 static FMOD_RESULT F_CALLBACK codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode, FMOD_CREATESOUNDEXINFO* exinfo) {
     ampaac_codec*        aac;
     const unsigned char* head;
     unsigned int         avail;
+    unsigned int         pos = 0;
     FMOD_RESULT          res;
 
     (void)exinfo;
@@ -289,79 +326,67 @@ static FMOD_RESULT F_CALLBACK codec_open(FMOD_CODEC_STATE* state, FMOD_MODE user
     memset(aac, 0, sizeof(*aac));
     state->plugindata = aac;
 
-    FMOD_CODEC_FILE_SEEK(state, 0, FMOD_CODEC_SEEK_METHOD_SET);
+    /* FMOD hands each codec the file at 0; a netstream turns any seek into a reconnect, so only rewind
+       when the position says otherwise. */
+    if (FMOD_CODEC_FILE_TELL(state, &pos) != FMOD_OK || pos != 0) {
+        FMOD_CODEC_FILE_SEEK(state, 0, FMOD_CODEC_SEEK_METHOD_SET);
+    }
     ampaac_reader_init(&aac->reader, state);
     skip_id3v2(&aac->reader);
 
     avail = ampaac_reader_peek(&aac->reader, 12, &head);
     if (foreign_magic(head, avail) || (avail >= 8 && memcmp(head + 4, "ftyp", 4) == 0)) {
-        codec_close(state);
-        return FMOD_ERR_FORMAT;
+        return fail_open(state, FMOD_ERR_FORMAT);
     }
 
     res = ampaac_adts_open(aac);
     if (res != FMOD_OK) {
-        codec_close(state);
-        return res;
+        return fail_open(state, res);
     }
 
-    /* Probe decode, then restart from the first frame with the channel count pinned. */
-    aac->decoder = open_decoder(TT_MP4_ADTS, 0);
+    /* Probe decode on the decoder the stream keeps (it retains the SBR/PS header), pin the channel count,
+       then restart from the first frame. */
+    aac->decoder = open_decoder(TT_MP4_ADTS);
     if (!aac->decoder) {
-        codec_close(state);
-        return FMOD_ERR_MEMORY;
+        return fail_open(state, FMOD_ERR_MEMORY);
     }
     aac->exact = 1;
-    res = learn_format(state, aac);
-    aacDecoder_Close(aac->decoder);
-    aac->decoder = 0;
-    if (res == FMOD_OK) {
-        res = ampaac_reader_seek(&aac->reader, aac->dataStart);
-    }
+    res = learn_format(aac);
     if (res != FMOD_OK) {
-        codec_close(state);
-        return res;
+        return fail_open(state, res);
     }
-    aac->decoder = open_decoder(TT_MP4_ADTS, aac->channels);
-    if (!aac->decoder) {
-        codec_close(state);
-        return FMOD_ERR_MEMORY;
+    aacDecoder_SetParam(aac->decoder, AAC_PCM_MIN_OUTPUT_CHANNELS, aac->channels);
+    aacDecoder_SetParam(aac->decoder, AAC_PCM_MAX_OUTPUT_CHANNELS, aac->channels);
+    aac->pcmPerFrame = (unsigned int)aac->frameSize;
+    ampaac_adts_reset_index(aac);
+    if (usermode & FMOD_ACCURATETIME) {
+        ampaac_adts_walk_to_end(aac);   /* reads the whole stream: exact length and a full seek index */
     }
-    aac->decodedPcm       = 0;
-    aac->feedBytes        = 0;
-    aac->feedFrames       = 0;
-    aac->indexLen         = 0;
-    aac->framesSinceIndex = 0;
-    aac->exact            = 1;
-    aac->pcmPerFrame      = (unsigned int)aac->frameSize;
-    update_length(aac);
-
-#ifdef AMPAAC_SPIKE
-    {
-        const char* scale = getenv("AMPAAC_LENGTH_SCALE");
-        if (scale && aac->lengthPcm != AMPAAC_UNKNOWN) {
-            aac->lengthPcm = (unsigned int)((double)aac->lengthPcm * atof(scale));
-        }
+    res = ampaac_reader_seek(&aac->reader, aac->dataStart);
+    if (res != FMOD_OK) {
+        return fail_open(state, res);
     }
-#endif
+    aac->decodedPcm = 0;
+    aac->exact      = 1;
+    restart_decode(aac);
 
     aac->waveformat.name         = ampaacIdent;
     aac->waveformat.format       = FMOD_SOUND_FORMAT_PCM16;
     aac->waveformat.channels     = aac->channels;
     aac->waveformat.frequency    = aac->sampleRate;
-    aac->waveformat.lengthbytes  = aac->reader.size == AMPAAC_UNKNOWN ? 0xFFFFFFFFu : aac->reader.size;
-    aac->waveformat.lengthpcm    = aac->lengthPcm;
+    aac->waveformat.lengthbytes  = aac->reader.size;
+    aac->waveformat.lengthpcm    = aac->lengthExact ? aac->lengthPcm : AMPAAC_UNKNOWN;
     aac->waveformat.pcmblocksize = (unsigned int)aac->frameSize;
     aac->waveformat.channelorder = FMOD_CHANNELORDER_WAVEFORMAT;
     channel_mask(aac);
 
     state->waveformat   = &aac->waveformat;
     state->numsubsounds = 0;
+    publish_length(state, aac);
 
-    TRACE("open adts start=%u size=%u rate=%d ch=%d frame=%d mean=%u lengthpcm=%u mode=0x%x",
+    TRACE("open adts start=%u size=%u rate=%d ch=%d frame=%d lengthpcm=%u estimate=%u mode=0x%x",
           aac->dataStart, aac->reader.size, aac->sampleRate, aac->channels, aac->frameSize,
-          aac->meanFrameBytes, aac->lengthPcm, (unsigned int)usermode);
-    (void)usermode;
+          aac->waveformat.lengthpcm, aac->lengthPcm, (unsigned int)usermode);
     return FMOD_OK;
 }
 
@@ -409,40 +434,13 @@ static FMOD_RESULT F_CALLBACK codec_read(FMOD_CODEC_STATE* state, void* buffer, 
     *samplesOut = produced;
 
     if (res == FMOD_ERR_FILE_EOF) {
-        TRACE("read eof produced=%u decoded=%u length=%u", produced, aac->decodedPcm, aac->lengthPcm);
+        TRACE("read eof produced=%u decoded=%u", produced, aac->decodedPcm);
         return produced > 0 ? FMOD_OK : FMOD_ERR_FILE_EOF;
     }
     if (res != FMOD_OK && produced == 0) {
         return res;
     }
     return FMOD_OK;
-}
-
-static FMOD_RESULT F_CALLBACK codec_getlength(FMOD_CODEC_STATE* state, unsigned int* length, FMOD_TIMEUNIT unit) {
-    ampaac_codec* aac = (ampaac_codec*)state->plugindata;
-
-#ifndef AMPAAC_SPIKE
-    update_length(aac);
-#endif
-    TRACE("getlength unit=0x%x pcm=%u", (unsigned int)unit, aac->lengthPcm);
-    switch (unit) {
-        case FMOD_TIMEUNIT_PCM:
-            *length = aac->lengthPcm;
-            return FMOD_OK;
-        case FMOD_TIMEUNIT_PCMBYTES:
-            *length = aac->lengthPcm == AMPAAC_UNKNOWN ? AMPAAC_UNKNOWN : aac->lengthPcm * (unsigned int)aac->channels * 2u;
-            return FMOD_OK;
-        case FMOD_TIMEUNIT_MS:
-            *length = aac->lengthPcm == AMPAAC_UNKNOWN
-                    ? AMPAAC_UNKNOWN
-                    : (unsigned int)((unsigned long long)aac->lengthPcm * 1000u / (unsigned int)aac->sampleRate);
-            return FMOD_OK;
-        case FMOD_TIMEUNIT_RAWBYTES:
-            *length = aac->reader.size;
-            return FMOD_OK;
-        default:
-            return FMOD_ERR_FORMAT;
-    }
 }
 
 static FMOD_RESULT F_CALLBACK codec_setposition(FMOD_CODEC_STATE* state, int subsound, unsigned int position, FMOD_TIMEUNIT unit) {
@@ -454,7 +452,7 @@ static FMOD_RESULT F_CALLBACK codec_setposition(FMOD_CODEC_STATE* state, int sub
     if (unit != FMOD_TIMEUNIT_PCM) {
         return FMOD_ERR_FORMAT;
     }
-    if (aac->lengthPcm != AMPAAC_UNKNOWN && position > aac->lengthPcm) {
+    if (aac->lengthExact && position > aac->lengthPcm) {
         position = aac->lengthPcm;
     }
 
@@ -462,14 +460,8 @@ static FMOD_RESULT F_CALLBACK codec_setposition(FMOD_CODEC_STATE* state, int sub
     if (res != FMOD_OK) {
         return res;
     }
-    /* No AACDEC_INTR: it drops SBR (and PS) to upsampling-only until the stream's next SBR header
-       (libSBRdec sbrdecoder.cpp SBR_BS_INTERRUPTION), which is ~0.8 s of dull, narrow audio after every
-       seek. The configuration is unchanged across a seek; the pre-roll rebuilds the frame-to-frame state. */
-    aacDecoder_SetParam(aac->decoder, AAC_TPDEC_CLEAR_BUFFER, 1);
-    aac->decodeFlags = 0;
-    aac->discard     = position > aac->decodedPcm ? position - aac->decodedPcm : 0;
-    aac->pcmFrames   = 0;
-    aac->pcmNext     = 0;
-    aac->exhausted   = 0;
+    restart_decode(aac);
+    aac->discard = position > aac->decodedPcm ? position - aac->decodedPcm : 0;
+    publish_length(state, aac);
     return FMOD_OK;
 }

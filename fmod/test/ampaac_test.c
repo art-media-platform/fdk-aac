@@ -35,8 +35,9 @@ typedef struct decoded {
     int          rate;
     int          channels;
     unsigned int frames;
-    unsigned int lengthAtOpen;
-    unsigned int lengthAtEnd;
+    unsigned int declaredLength;   /* waveformat.lengthpcm at open */
+    unsigned int tagAtOpenMs;      /* AMPAAC_LENGTH_TAG after open, 0 if none */
+    unsigned int tagAtEndMs;       /* ... after EOF */
     short*       pcm;
 } decoded;
 
@@ -80,8 +81,8 @@ static FMOD_CODEC_DESCRIPTION* codec(void) {
     return AMPAAC_GetCodecDescription();
 }
 
-static FMOD_RESULT open_file(fake_file* file) {
-    return codec()->open(&file->state, FMOD_CREATESTREAM, NULL);
+static FMOD_RESULT open_file(fake_file* file, FMOD_MODE mode) {
+    return codec()->open(&file->state, FMOD_CREATESTREAM | mode, NULL);
 }
 
 static void close_file(fake_file* file) {
@@ -119,27 +120,26 @@ static FMOD_RESULT read_all(fake_file* file, unsigned int chunk, decoded* out) {
     }
 }
 
-static unsigned int length_pcm(fake_file* file) {
-    unsigned int length = 0;
-    codec()->getlength(&file->state, &length, FMOD_TIMEUNIT_PCM);
-    return length;
-}
-
 static FMOD_RESULT decode_blob(const unsigned char* data, unsigned int size, unsigned int chunk, decoded* out) {
     fake_file   file;
     FMOD_RESULT res;
 
     memset(out, 0, sizeof(*out));
     fake_file_init(&file, data, size);
-    res = open_file(&file);
+    res = open_file(&file, 0);
     if (res != FMOD_OK) {
         return res;
     }
-    out->lengthAtOpen = file.state.waveformat->lengthpcm;
+    out->declaredLength = file.state.waveformat->lengthpcm;
+    out->tagAtOpenMs    = file.lengthTags ? file.lengthTagMs : 0;
     res = read_all(&file, chunk, out);
-    out->lengthAtEnd = length_pcm(&file);
+    out->tagAtEndMs     = file.lengthTags ? file.lengthTagMs : 0;
     close_file(&file);
     return res;
+}
+
+static unsigned int frames_to_ms(unsigned int frames, int rate) {
+    return (unsigned int)((unsigned long long)frames * 1000u / (unsigned int)rate);
 }
 
 /* Frequency of one channel from positive-going zero crossings over [from, from + count). */
@@ -181,6 +181,41 @@ static void check_tones(const decoded* d, const char* what) {
     }
 }
 
+/* Largest sample difference between a post-seek decode (from `target`) and the continuous decode, over
+   [from, from + frames) past the target. */
+static double seek_divergence(const decoded* whole, const decoded* tail, unsigned int target, unsigned int from, unsigned int frames) {
+    double       worst = 0;
+    unsigned int n;
+
+    for (n = from * (unsigned int)whole->channels;
+         n < (from + frames) * (unsigned int)whole->channels && n < tail->frames * (unsigned int)whole->channels; n++) {
+        double diff = fabs((double)tail->pcm[n] - whole->pcm[(size_t)target * whole->channels + n]);
+        if (diff > worst) {
+            worst = diff;
+        }
+    }
+    return worst;
+}
+
+/* Opens, optionally decodes everything first, seeks to target and decodes to EOF. */
+static FMOD_RESULT seek_and_decode(const blob* src, int decodeFirst, unsigned int target, decoded* tail, fake_file* file) {
+    FMOD_RESULT res;
+
+    fake_file_init(file, src->data, src->size);
+    open_file(file, 0);
+    codec()->setposition(&file->state, 0, 0, FMOD_TIMEUNIT_PCM);   /* FMOD rewinds right after open */
+    if (decodeFirst) {
+        read_all(file, 4096, tail);
+        free(tail->pcm);
+    }
+    res = codec()->setposition(&file->state, 0, target, FMOD_TIMEUNIT_PCM);
+    if (res == FMOD_OK) {
+        res = read_all(file, 4096, tail);
+    }
+    close_file(file);
+    return res;
+}
+
 static void test_fixture(const fixture* fx) {
     blob         src = load(fx->name);
     decoded      whole;
@@ -196,18 +231,32 @@ static void test_fixture(const fixture* fx) {
     CHECK(whole.channels == fx->channels, "channels %d, want %d", whole.channels, fx->channels);
     CHECK(whole.frames >= want && whole.frames <= want + want / 10,
           "decoded %u frames, want 3.0 s (%u) plus encoder padding", whole.frames, want);
-    CHECK(whole.lengthAtEnd == whole.frames, "length at EOF %u != decoded %u", whole.lengthAtEnd, whole.frames);
-    CHECK(whole.lengthAtOpen != AMPAAC_UNKNOWN
-          && fabs((double)whole.lengthAtOpen - whole.frames) < whole.frames * 0.15,
-          "length estimate at open %u vs decoded %u", whole.lengthAtOpen, whole.frames);
     check_tones(&whole, "whole");
+
+    /* FMOD ends a stream at the declared length, so ADTS declares none; the estimate travels as a tag
+       and becomes exact at EOF. */
+    CHECK(whole.declaredLength == AMPAAC_UNKNOWN, "declared length %u, want unknown", whole.declaredLength);
+    CHECK(whole.tagAtOpenMs > 0 && fabs((double)whole.tagAtOpenMs - frames_to_ms(whole.frames, whole.rate))
+          < frames_to_ms(whole.frames, whole.rate) * 0.15,
+          "length tag at open %u ms vs decoded %u ms", whole.tagAtOpenMs, frames_to_ms(whole.frames, whole.rate));
+    CHECK(whole.tagAtEndMs == frames_to_ms(whole.frames, whole.rate),
+          "length tag at EOF %u ms, want exact %u ms", whole.tagAtEndMs, frames_to_ms(whole.frames, whole.rate));
+
+    /* FMOD_ACCURATETIME walks the stream at open: exact declared length. */
+    fake_file_init(&file, src.data, src.size);
+    res = open_file(&file, FMOD_ACCURATETIME);
+    CHECK(res == FMOD_OK && file.state.waveformat->lengthpcm == whole.frames,
+          "ACCURATETIME declared length %u, want %u", res == FMOD_OK ? file.state.waveformat->lengthpcm : 0, whole.frames);
+    if (res == FMOD_OK) {
+        close_file(&file);
+    }
 
     /* Trickling reads decode bit-identically. */
     {
         decoded trickle;
         fake_file_init(&file, src.data, src.size);
         file.maxChunk = 97;
-        res = open_file(&file);
+        res = open_file(&file, 0);
         CHECK(res == FMOD_OK, "trickle open %d", res);
         if (res == FMOD_OK) {
             read_all(&file, 1000, &trickle);
@@ -219,90 +268,77 @@ static void test_fixture(const fixture* fx) {
         }
     }
 
-    /* Seek inside the index (decoded region): lands on the continuous decode. */
+    /* Rewind right after open (FMOD does this): nothing is skipped. */
     {
-        decoded      tail;
+        decoded again;
+        fake_file_init(&file, src.data, src.size);
+        open_file(&file, 0);
+        res = codec()->setposition(&file.state, 0, 0, FMOD_TIMEUNIT_PCM);
+        CHECK(res == FMOD_OK, "setposition(0) %d", res);
+        read_all(&file, 4096, &again);
+        CHECK(again.frames == whole.frames
+              && memcmp(again.pcm, whole.pcm, (size_t)whole.frames * whole.channels * sizeof(short)) == 0,
+              "decode after setposition(0) differs (%u vs %u frames)", again.frames, whole.frames);
+        free(again.pcm);
+        close_file(&file);
+    }
+
+    /* Exact seeks land on the continuous decode's sample positions. Into the decoded region: LC is
+       bit-exact, SBR/PS leave a few LSB of fixed-point residue after the pre-roll. Ahead of anything
+       decoded (header walk), the decoder knows only the opening frames' SBR/PS headers; parametric stereo
+       then renders slightly differently until the stream's next header (~0.8 s in these fixtures), where
+       it converges. A dormant SBR (the AACDEC_INTR failure) shows as thousands of LSB. */
+    {
         unsigned int target = (unsigned int)(1.3 * fx->rate);
-        unsigned int compare = 4096;
-        double       worst = 0;
-        unsigned int n;
+        decoded      tail;
+        double       early;
+        double       later;
 
-        fake_file_init(&file, src.data, src.size);
-        open_file(&file);
-        read_all(&file, 4096, &tail);
+        res = seek_and_decode(&src, 1, target, &tail, &file);
+        CHECK(res == FMOD_OK && tail.frames == whole.frames - target, "seek (decoded) %d, %u frames, want %u",
+              res, tail.frames, whole.frames - target);
+        early = seek_divergence(&whole, &tail, target, 0, 4096);
+        printf("  exact seek (decoded region): max |diff| %.0f\n", early);
+        CHECK(early <= 4, "exact seek (decoded) diverges from the continuous decode (max |diff| %.0f)", early);
         free(tail.pcm);
-        res = codec()->setposition(&file.state, 0, target, FMOD_TIMEUNIT_PCM);
-        CHECK(res == FMOD_OK, "setposition %d", res);
-        read_all(&file, 4096, &tail);
-        CHECK(tail.frames == whole.frames - target, "after seek %u frames, want %u", tail.frames, whole.frames - target);
-        for (n = 0; n < compare * whole.channels && n < tail.frames * (unsigned int)whole.channels; n++) {
-            double diff = fabs((double)tail.pcm[n] - whole.pcm[(size_t)target * whole.channels + n]);
-            if (diff > worst) {
-                worst = diff;
-            }
-        }
-        printf("  exact seek: max |diff| %.0f over %u frames\n", worst, compare);
-        if (worst > 4) {
-            /* Where the divergence sits, and the lag that best aligns the two decodes. */
-            unsigned int window;
-            int          lag;
-            int          bestLag = 0;
-            double       bestErr = 1e30;
-            for (window = 0; window < compare; window += 512) {
-                double w = 0;
-                for (n = window * whole.channels; n < (window + 512) * whole.channels && n < tail.frames * (unsigned int)whole.channels; n++) {
-                    double diff = fabs((double)tail.pcm[n] - whole.pcm[(size_t)target * whole.channels + n]);
-                    if (diff > w) {
-                        w = diff;
-                    }
-                }
-                printf("    frames %4u..%4u max |diff| %.0f\n", window, window + 511, w);
-            }
-            for (lag = -64; lag <= 64; lag++) {
-                double err = 0;
-                for (n = 2048; n < 4096; n++) {
-                    double diff = (double)tail.pcm[(size_t)n * whole.channels] - whole.pcm[(size_t)(target + n + lag) * whole.channels];
-                    err += diff * diff;
-                }
-                if (err < bestErr) {
-                    bestErr = err;
-                    bestLag = lag;
-                }
-            }
-            printf("    best alignment lag %d (residual rms %.1f)\n", bestLag, sqrt(bestErr / 2048));
-        }
-        /* LC lands bit-exact; SBR/PS leave a few LSB of fixed-point residue after the pre-roll. */
-        CHECK(worst <= 4, "exact seek diverges from the continuous decode (max |diff| %.0f)", worst);
+
+        res = seek_and_decode(&src, 0, target, &tail, &file);
+        CHECK(res == FMOD_OK && tail.frames == whole.frames - target, "seek (walked) %d, %u frames, want %u",
+              res, tail.frames, whole.frames - target);
+        early = seek_divergence(&whole, &tail, target, 0, 4096);
+        later = seek_divergence(&whole, &tail, target, (unsigned int)fx->rate, 4096);
+        printf("  exact seek (header walk): max |diff| %.0f, %.0f after 1 s\n", early, later);
+        CHECK(early <= 2048, "exact seek (walked) starts with dormant SBR/PS (max |diff| %.0f)", early);
+        CHECK(later <= 4, "exact seek (walked) has not converged 1 s on (max |diff| %.0f)", later);
         free(tail.pcm);
-        close_file(&file);
     }
 
-    /* Seek before anything was decoded: lands by estimate, audio continues. */
+    /* No walk budget: the seek lands by the mean frame size; audio continues near the target. */
     {
         decoded      tail;
-        unsigned int target = (unsigned int)(1.0 * fx->rate);
+        unsigned int target = (unsigned int)(2.5 * fx->rate);
+        unsigned int saved = ampaac_hop_budget_ms;
 
-        fake_file_init(&file, src.data, src.size);
-        open_file(&file);
-        res = codec()->setposition(&file.state, 0, target, FMOD_TIMEUNIT_PCM);
-        CHECK(res == FMOD_OK, "estimated setposition %d", res);
-        read_all(&file, 4096, &tail);
-        CHECK(tail.frames > whole.frames - target - 3 * 2048 && tail.frames < whole.frames - target + 3 * 2048,
+        ampaac_hop_budget_ms = 0;
+        res = seek_and_decode(&src, 0, target, &tail, &file);
+        ampaac_hop_budget_ms = saved;
+        CHECK(res == FMOD_OK, "estimated seek %d", res);
+        CHECK(tail.frames + 3 * 2048 > whole.frames - target && tail.frames < whole.frames - target + 3 * 2048,
               "after estimated seek %u frames, want about %u", tail.frames, whole.frames - target);
-        CHECK(rms(tail.pcm, 4096 * tail.channels) > 2000, "silence after estimated seek");
+        CHECK(tail.frames > 2048 && rms(tail.pcm, 2048 * tail.channels) > 2000, "silence after estimated seek");
         free(tail.pcm);
-        close_file(&file);
     }
 
-    /* Source without a size: length unknown (FmodPlayer treats it as live), decode unchanged. */
+    /* Source without a size: no length at all (FmodPlayer treats it as live), decode unchanged. */
     {
         decoded live;
         fake_file_init(&file, src.data, src.size);
         file.sizeUnknown = 1;
-        res = open_file(&file);
+        res = open_file(&file, 0);
         CHECK(res == FMOD_OK, "unknown-size open %d", res);
         if (res == FMOD_OK) {
-            CHECK(file.state.waveformat->lengthpcm == AMPAAC_UNKNOWN, "unknown-size length %u", file.state.waveformat->lengthpcm);
+            CHECK(file.state.waveformat->lengthpcm == AMPAAC_UNKNOWN && file.lengthTags == 0,
+                  "unknown-size: declared %u, %d length tags", file.state.waveformat->lengthpcm, file.lengthTags);
             read_all(&file, 4096, &live);
             CHECK(live.frames == whole.frames, "unknown-size decoded %u, want %u", live.frames, whole.frames);
             free(live.pcm);
@@ -365,7 +401,7 @@ static void expect_format_error(const char* what, const unsigned char* data, uns
     FMOD_RESULT res;
 
     fake_file_init(&file, data, size);
-    res = open_file(&file);
+    res = open_file(&file, 0);
     CHECK(res == FMOD_ERR_FORMAT, "%s: open %d, want FMOD_ERR_FORMAT", what, res);
     if (res == FMOD_OK) {
         close_file(&file);
@@ -409,7 +445,7 @@ static void test_rejects(void) {
     fake_file_init(&file, buf, sizeof(buf));
     file.failAtPos = FMOD_ERR_NET_SOCKET_ERROR;
     file.failPos   = 0;
-    res = open_file(&file);
+    res = open_file(&file, 0);
     CHECK(res == FMOD_ERR_NET_SOCKET_ERROR, "socket error at open: %d, want FMOD_ERR_NET_SOCKET_ERROR", res);
     CHECK(fake_live_allocations() == 0, "socket error: %ld allocations leaked", fake_live_allocations());
 }
