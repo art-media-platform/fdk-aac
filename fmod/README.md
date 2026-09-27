@@ -16,9 +16,9 @@ modified (see [Changes to the FDK AAC Codec](#changes-to-the-fdk-aac-codec)).
 - **Containers:** ADTS (`.aac`), including ID3v2 prefixes and streams that start mid-frame (ICY captures);
   MP4/M4A with `moov` before or after `mdat`, within the first 64 top-level boxes. Fragmented MP4 is
   rejected.
-- **Output:** 16-bit PCM in WAV channel order: 1, 2, 6 or 8 channels, the counts fdk's mixer can pin. A 3–5
-  channel stream opens as 5.1 and a 7-channel one as 7.1, with the missing channels silent. The count is
-  pinned at open, so a mid-stream layout change cannot change FMOD's format.
+- **Output:** 16-bit PCM in WAV channel order: 1, 2 or 6 channels. A 3–5 channel stream opens as 5.1 with
+  the missing channels silent; fdk's mixer downmixes 7 and 8 channels to 5.1 (its default output limit is 6).
+  The count is pinned at open, so a mid-stream layout change cannot change FMOD's format.
 - **Level:** fdk's loudness normalization is off (`AAC_DRC_REFERENCE_LEVEL` = -1): output keeps the
   encoded level.
 - **Gapless:** M4A trims the encoder's priming and padding (edit list or `iTunSMPB`) and compensates
