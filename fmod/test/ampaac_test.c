@@ -366,7 +366,7 @@ static void test_fixture(const fixture* fx) {
        stream's next header (~0.8 s in these fixtures), then converges. A dormant SBR (the AACDEC_INTR
        failure) shows as thousands of LSB. */
     {
-        static const char* const names[] = { "fresh (header walk)", "while playing", "after EOF" };
+        static const char* const names[] = { "fresh (open index)", "while playing", "after EOF" };
         unsigned int target = (unsigned int)(1.3 * fx->rate);
         int          setup;
 
@@ -1244,6 +1244,22 @@ static void test_far_seek(void) {
         CHECK(res == FMOD_OK && got == 4096 && max_diff(pcm, whole.pcm + (size_t)near * 2, (size_t)got * 2) <= 1,
               "near seek to 12 s: %d, %u frames, max |diff| %.0f", res, got,
               got ? max_diff(pcm, whole.pcm + (size_t)near * 2, (size_t)got * 2) : -1.0);
+
+        {
+            /* Past the open's 128 KiB index (~19 s) and ~76 KB inside the 256 KiB walk: the seek walks frame headers. */
+            ampaac_codec* aac = (ampaac_codec*)file.state.plugindata;
+            unsigned int  indexed = aac->indexLen;
+            unsigned int  mid = 30 * 44100;
+
+            seeks = file.seeks;
+            res   = codec()->setposition(&file.state, 0, mid, FMOD_TIMEUNIT_PCM);
+            got   = read_frames(&file, pcm, 4096);
+            CHECK(res == FMOD_OK && got == 4096 && max_diff(pcm, whole.pcm + (size_t)mid * 2, (size_t)got * 2) <= 1
+                      && file.seeks == seeks && aac->indexLen > indexed,
+                  "walked seek to 30 s: %d, %u frames, max |diff| %.0f, %u source seeks, index %u -> %u", res, got,
+                  got ? max_diff(pcm, whole.pcm + (size_t)mid * 2, (size_t)got * 2) : -1.0, file.seeks - seeks, indexed,
+                  aac->indexLen);
+        }
 
         reads = file.reads;
         seeks = file.seeks;
