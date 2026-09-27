@@ -10,12 +10,18 @@
  *     teardown   release the System while the open waits for body bytes (the server holds the body), then
  *                stay alive for seek-ms more (default 2000) while the open resolves; AMPAAC_ABANDON=1 first
  *                drops the network timeout to 50 ms and waits for the open to settle
+ *     pause      play 2 s, pause for ms, resume, play to the end
+ *     seekdown   play 1 s, Channel::setPosition(ms), wait AMPAAC_SEEKDOWN_WAIT seconds (default 1.5), then
+ *                release the System mid-seek and stay alive 5 s; AMPAAC_ABANDON=1 first drops the network
+ *                timeout to 50 ms and waits up to 1 s for the sound to settle (the client's CloseSystem)
  *
  *   AMPAAC_REGISTER=after|before|none   when to register the codec (default after System::init)
  *   AMPAAC_PRIORITY=<n>                 codec priority (default 0)
  *   AMPAAC_WAVWRITER=<file.wav>         record the mix with FMOD's realtime WAV writer instead of NOSOUND
  *   AMPAAC_STREAM_BUFFER=<bytes>        stream file buffer (default 131072, as the AMP client; 0 = FMOD's default)
  *   AMPAAC_PLAY_TIMEOUT=<seconds>       give up on a channel that has not stopped (default 600)
+ *   AMPAAC_NET_TIMEOUT=<ms>             FMOD's network timeout (default 10000; the AMP client uses 73000)
+ *   AMPAAC_OPEN_WAIT=<seconds>          give up on an open that is neither READY nor ERROR (default 20)
  *
  * FMOD's headers come from FMOD_API_INC at build time; FMOD's library is loaded at run time.
  */
@@ -50,7 +56,8 @@
     X(FMOD_Sound_GetTag)                      \
     X(FMOD_Channel_IsPlaying)                 \
     X(FMOD_Channel_GetPosition)               \
-    X(FMOD_Channel_SetPosition)
+    X(FMOD_Channel_SetPosition)               \
+    X(FMOD_Channel_SetPaused)
 
 #define DECLARE(name) static __typeof__(&name) p_##name;
 FMOD_FUNCTIONS(DECLARE)
@@ -86,8 +93,10 @@ static void register_codec(FMOD_SYSTEM* system, describe_fn describe, unsigned i
 
 /* Polls until the open settles; returns seconds taken (negative on timeout). */
 static double wait_ready(FMOD_SYSTEM* system, FMOD_SOUND* sound, FMOD_OPENSTATE* state) {
-    double start = now();
-    while (now() - start < 20) {
+    const char* limit = getenv("AMPAAC_OPEN_WAIT");
+    double      openWait = limit ? atof(limit) : 20;
+    double      start = now();
+    while (now() - start < openWait) {
         unsigned int percent;
         FMOD_BOOL    starving;
         FMOD_BOOL    diskbusy;
@@ -119,29 +128,91 @@ static void report_length(FMOD_SOUND* sound, const char* when) {
     printf("length_%s_pcm=%u length_%s_ms=%u tag_%s_ms=%u\n", when, pcm, when, ms, when, tagMs);
 }
 
-/* Plays until the channel stops (FmodPlayer: READY and the channel stopped = end of track). */
-static void play_to_end(FMOD_SYSTEM* system, FMOD_CHANNEL* channel, double seekAt, unsigned int seekMs) {
-    const char*  limit = getenv("AMPAAC_PLAY_TIMEOUT");
-    double       playTimeout = limit ? atof(limit) : 600;
-    double       start = now();
-    unsigned int lastPos = 0;
-    int          seeked = 0;
+/* Plays until the channel stops (FmodPlayer: READY and the channel stopped = end of track), logging each
+   change of the sound's open state, starving flag, and getOpenState result. `action` is "seek" (at 1.0 s),
+   "pause" (at 2.0 s, for ms), "seekdown" (seek at 1.0 s, then release the System), or NULL. Returns 1 when
+   the System was released here. */
+static int play_to_end(FMOD_SYSTEM* system, FMOD_SOUND* sound, FMOD_CHANNEL* channel, const char* action,
+                       unsigned int ms) {
+    const char*    limit = getenv("AMPAAC_PLAY_TIMEOUT");
+    const char*    wait = getenv("AMPAAC_SEEKDOWN_WAIT");
+    double         playTimeout = limit ? atof(limit) : 600;
+    double         seekdownWait = wait ? atof(wait) : 1.5;
+    double         start = now();
+    double         seekedAt = 0;
+    unsigned int   lastPos = 0;
+    int            seeked = 0;
+    int            paused = 0;
+    FMOD_OPENSTATE lastState = (FMOD_OPENSTATE)-1;
+    FMOD_BOOL      lastStarving = 0;
+    FMOD_RESULT    lastResult = FMOD_OK;
+    int            isSeek = action && (strcmp(action, "seek") == 0 || strcmp(action, "seekdown") == 0);
 
     for (;;) {
-        FMOD_BOOL    playing = 0;
-        unsigned int pos = 0;
+        FMOD_BOOL      playing = 0;
+        unsigned int   pos = 0;
+        FMOD_OPENSTATE state;
+        unsigned int   percent;
+        FMOD_BOOL      starving = 0;
+        FMOD_BOOL      diskbusy;
+        FMOD_RESULT    res;
 
         p_FMOD_System_Update(system);
+        res = p_FMOD_Sound_GetOpenState(sound, &state, &percent, &starving, &diskbusy);
+        if (state != lastState || starving != lastStarving || res != lastResult) {
+            printf("t=%.3f openstate=%d starving=%d result=%d position_ms=%u\n", now() - start, (int)state,
+                   (int)starving, (int)res, lastPos);
+            lastState = state;
+            lastStarving = starving;
+            lastResult = res;
+        }
         if (p_FMOD_Channel_IsPlaying(channel, &playing) != FMOD_OK || !playing) {
             break;
         }
         if (p_FMOD_Channel_GetPosition(channel, &pos, FMOD_TIMEUNIT_MS) == FMOD_OK) {
             lastPos = pos;
         }
-        if (!seeked && seekAt > 0 && now() - start >= seekAt) {
+        if (isSeek && !seeked && now() - start >= 1.0) {
             seeked = 1;
-            check(p_FMOD_Channel_SetPosition(channel, seekMs, FMOD_TIMEUNIT_MS), "setPosition");
-            printf("seek_at_s=%.3f seek_to_ms=%u\n", now() - start, seekMs);
+            seekedAt = now();
+            check(p_FMOD_Channel_SetPosition(channel, ms, FMOD_TIMEUNIT_MS), "setPosition");
+            printf("seek_at_s=%.3f seek_to_ms=%u\n", now() - start, ms);
+        }
+        if (seeked && strcmp(action, "seekdown") == 0 && now() - seekedAt >= seekdownWait) {
+            printf("seekdown: openstate=%d at %.3f s\n", (int)state, now() - start);
+            if (getenv("AMPAAC_ABANDON")) {
+                double abandonAt = now();
+                p_FMOD_System_SetNetworkTimeout(system, 50);
+                while (now() - abandonAt < 1.0) {
+                    p_FMOD_System_Update(system);
+                    res = p_FMOD_Sound_GetOpenState(sound, &state, &percent, &starving, &diskbusy);
+                    if (res != FMOD_OK || state == FMOD_OPENSTATE_READY || state == FMOD_OPENSTATE_ERROR) {
+                        break;
+                    }
+                    usleep(2000);
+                }
+                printf("abandoned: openstate=%d result=%d after %.3f s\n", (int)state, (int)res, now() - abandonAt);
+            }
+            printf("releasing the System at %.3f s\n", now() - start);
+            fflush(stdout);
+            p_FMOD_System_Close(system);
+            p_FMOD_System_Release(system);
+            printf("released at %.3f s\n", now() - start);
+            fflush(stdout);
+            usleep(5000000);
+            printf("survived 5 s after release\n");
+            return 1;
+        }
+        if (action && strcmp(action, "pause") == 0) {
+            if (paused == 0 && now() - start >= 2.0) {
+                paused = 1;
+                check(p_FMOD_Channel_SetPaused(channel, 1), "setPaused");
+                printf("paused_at_s=%.3f position_ms=%u\n", now() - start, lastPos);
+            } else if (paused == 1 && now() - start >= 2.0 + ms / 1000.0) {
+                paused = 2;
+                check(p_FMOD_Channel_SetPaused(channel, 0), "setPaused");
+                printf("resumed_at_s=%.3f position_ms=%u\n", now() - start, lastPos);
+            }
         }
         if (now() - start > playTimeout) {
             printf("error=timeout (channel still playing after %.0f s)\n", playTimeout);
@@ -150,6 +221,7 @@ static void play_to_end(FMOD_SYSTEM* system, FMOD_CHANNEL* channel, double seekA
         usleep(5000);
     }
     printf("stopped_after_s=%.3f last_position_ms=%u\n", now() - start, lastPos);
+    return 0;
 }
 
 int main(int argc, char** argv) {
@@ -177,7 +249,7 @@ int main(int argc, char** argv) {
     double started;
 
     if (argc < 5) {
-        fprintf(stderr, "usage: fmod_harness <libfmod> <libampaac|-> <play|seek|getlength|open|teardown> <url> [ms]\n");
+        fprintf(stderr, "usage: fmod_harness <libfmod> <libampaac|-> <play|seek|getlength|open|teardown|pause|seekdown> <url> [ms]\n");
         return 2;
     }
     scenario = argv[3];
@@ -201,7 +273,8 @@ int main(int argc, char** argv) {
     check(p_FMOD_System_Create(&system, FMOD_RUNTIME_VERSION), "System_Create");
     check(p_FMOD_System_SetOutput(system, wavPath ? FMOD_OUTPUTTYPE_WAVWRITER : FMOD_OUTPUTTYPE_NOSOUND), "setOutput");
     check(p_FMOD_System_SetSoftwareFormat(system, 48000, FMOD_SPEAKERMODE_DEFAULT, 0), "setSoftwareFormat");
-    check(p_FMOD_System_SetNetworkTimeout(system, 10000), "setNetworkTimeout");
+    check(p_FMOD_System_SetNetworkTimeout(system, getenv("AMPAAC_NET_TIMEOUT") ? atoi(getenv("AMPAAC_NET_TIMEOUT")) : 10000),
+          "setNetworkTimeout");
     if (streamBuffer > 0) {
         check(p_FMOD_System_SetStreamBufferSize(system, streamBuffer, FMOD_TIMEUNIT_RAWBYTES), "setStreamBufferSize");
     }
@@ -277,7 +350,9 @@ int main(int argc, char** argv) {
         }
         report_length(sound, "after1s");
     }
-    play_to_end(system, channel, strcmp(scenario, "seek") == 0 ? 1.0 : 0, seekMs);
+    if (play_to_end(system, sound, channel, strcmp(scenario, "play") == 0 ? NULL : scenario, seekMs)) {
+        return 0;   /* seekdown released the System */
+    }
     report_length(sound, "end");
     printf("total_s=%.3f\n", now() - started);
 
