@@ -109,7 +109,13 @@ Registering before or after `System::init` both work. FMOD's manual lists its bu
 MPEG 2400. Priority 1000 places ampaac after WAV (measured: between 500 and 700) and Ogg, level with AIFF
 (each rejects the other's data), and before FLAC, MPEG (measured: between 2150 and 2500) and the platform
 codecs, which cannot netstream AAC. Formats tried after ampaac pay its probe: an MP3 open over HTTP made 6
-requests instead of 4. FMOD for Unity's C# wrapper has no
+requests instead of 4. FMOD then rewinds the stream for its next codec. A server without Range support is
+rewound only inside the sound's file buffer (`FMOD_CREATESOUNDEXINFO::filebuffersize`, 2 KiB by default), and
+ampaac reads up to 8 KiB before it rejects a stream: unhinted, a live MP3 without Range failed to open
+(`FMOD_ERR_FILE_COULDNOTSEEK`). Hint the codec for content you know is not AAC
+(`FMOD_CREATESOUNDEXINFO::suggestedsoundtype`, e.g. `FMOD_SOUND_TYPE_MPEG`): FMOD tries it first, and an AAC
+stream hinted MPEG still opens through ampaac. A larger file buffer also opens the live MP3, but it moves
+FMOD's tail read at open to `floor((size - 128) / buffer) * buffer`. FMOD for Unity's C# wrapper has no
 `registerCodec`: P/Invoke `FMOD5_System_RegisterCodec(IntPtr system, IntPtr description, out uint handle,
 uint priority)` from FMOD's library, and `AMPAAC_GetCodecDescription` from `ampaac` (`__Internal` on iOS,
 where `libampaac.a` links into the app).
