@@ -35,6 +35,7 @@ if(AMPAAC_PLATFORM STREQUAL "ANDROID")
     set(CMAKE_TOOLCHAIN_FILE                "${ANDROID_NDK}/build/cmake/android.toolchain.cmake")
     set(ANDROID_PLATFORM                    android-27)
     set(ANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES ON)          # 16 KB LOAD alignment (Android 15+)
+    set(ANDROID_STL                         none)        # no C++ runtime: fdk-aac uses none
     set(AMPAAC_INSTALL_SUBDIR               "Android/${ANDROID_ABI}")
 
 elseif(AMPAAC_PLATFORM STREQUAL "IOS")
@@ -159,7 +160,8 @@ if(AMPAAC_PLATFORM STREQUAL "IOS")
     set(_archive   "${CMAKE_CURRENT_BINARY_DIR}/libampaac.a")
     add_custom_command(
         OUTPUT  "${_archive}"
-        COMMAND "${CMAKE_C_COMPILER}" -arch arm64 -isysroot "${CMAKE_OSX_SYSROOT}" -nostdlib -r
+        COMMAND "${CMAKE_C_COMPILER}" -arch arm64 -isysroot "${CMAKE_OSX_SYSROOT}"
+                -mios-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET} -nostdlib -r
                 -Wl,-exported_symbol,_AMPAAC_GetCodecDescription
                 -o "${_prelinked}"
                 $<TARGET_OBJECTS:ampaac_objects> $<TARGET_OBJECTS:fdkdec>
@@ -176,13 +178,14 @@ else()
     # fdk-aac is C++ without exceptions, RTTI or the C++ library: link as C, no C++ runtime dependency.
     set_target_properties(ampaac PROPERTIES LINKER_LANGUAGE C)
 
+    # Release libraries ship with local symbols stripped (they are committed to the Unity assets repo).
     if(APPLE)
-        target_link_options(ampaac PRIVATE -Wl,-dead_strip)
+        target_link_options(ampaac PRIVATE -Wl,-dead_strip $<$<CONFIG:Release>:-Wl,-x>)
     elseif(AMPAAC_PLATFORM STREQUAL "WINDOWS")
         set_target_properties(ampaac PROPERTIES PREFIX "")
         target_link_options(ampaac PRIVATE -static -Wl,--exclude-all-symbols -Wl,--no-insert-timestamp)
     else()
-        target_link_options(ampaac PRIVATE -Wl,--gc-sections -Wl,--no-undefined)
+        target_link_options(ampaac PRIVATE -Wl,--gc-sections -Wl,--no-undefined $<$<CONFIG:Release>:-s>)
         target_link_libraries(ampaac PRIVATE m)
     endif()
     set(AMPAAC_ARTIFACT "$<TARGET_FILE:ampaac>")
