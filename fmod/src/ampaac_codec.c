@@ -66,8 +66,8 @@ F_EXPORT FMOD_CODEC_DESCRIPTION* F_CALL FMODGetCodecDescription(void) {
 }
 #endif
 
-/* ID3v2 tags ahead of ADTS: skipped by their synchsafe size. */
-static void skip_id3v2(ampaac_reader* rd) {
+/* ID3v2 tags ahead of ADTS: skipped by their synchsafe size. Returns the count skipped. */
+static int skip_id3v2(ampaac_reader* rd) {
     int tags;
 
     for (tags = 0; tags < 4; tags++) {
@@ -75,11 +75,11 @@ static void skip_id3v2(ampaac_reader* rd) {
         unsigned int         size;
 
         if (ampaac_reader_peek(rd, 10, &p) < 10) {
-            return;
+            return tags;
         }
         if (p[0] != 'I' || p[1] != 'D' || p[2] != '3' || p[3] == 0xFF || p[4] == 0xFF
             || ((p[6] | p[7] | p[8] | p[9]) & 0x80)) {
-            return;
+            return tags;
         }
         size = ((unsigned int)p[6] << 21) | ((unsigned int)p[7] << 14) | ((unsigned int)p[8] << 7) | p[9];
         size += 10;
@@ -88,6 +88,7 @@ static void skip_id3v2(ampaac_reader* rd) {
         }
         ampaac_reader_skip(rd, size);
     }
+    return tags;
 }
 
 /* Formats FMOD's own codecs claim by magic; answering FORMAT at once spares the ADTS scan. */
@@ -510,6 +511,9 @@ static FMOD_RESULT F_CALL codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode
     unsigned int         pos = 0;
     ampaac_format        format;
     FMOD_RESULT          res;
+    unsigned int         tagEnd;
+    int                  tagged;
+    int                  tagFault;
 
     (void)exinfo;
     aac = (ampaac_codec*)FMOD_CODEC_ALLOC(state, sizeof(ampaac_codec), 16);
@@ -528,13 +532,17 @@ static FMOD_RESULT F_CALL codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode
         }
     }
     ampaac_reader_init(&aac->reader, state);
-    skip_id3v2(&aac->reader);
+    tagged   = skip_id3v2(&aac->reader);
+    tagFault = aac->reader.fault != FMOD_OK;
+    tagEnd   = aac->reader.pos;
 
     /* Until the data shows ftyp or an ADTS chain it is not known to be AAC: FMOD's own codecs still get their
-       turn after a file error here (an MP3's ID3v2 skip is a hard seek), not after a network one. */
+       turn after a file error here, not after a network one. A fault inside ID3v2 tags answers FORMAT too:
+       FMOD's MPEG codec skips a tag with a hard seek, a new request, so it would not wait on this transport. */
     avail = ampaac_reader_peek(&aac->reader, 12, &head);
     if (aac->reader.fault != FMOD_OK) {
-        return fail_open(state, ampaac_probe_fault(aac->reader.fault));
+        int inTags = tagged && (tagFault || aac->reader.pos < tagEnd);
+        return fail_open(state, inTags ? FMOD_ERR_FORMAT : ampaac_probe_fault(aac->reader.fault));
     }
     if (foreign_magic(head, avail)) {
         return fail_open(state, FMOD_ERR_FORMAT);

@@ -1502,6 +1502,32 @@ static void test_audit_round3(void) {
         free(adts.data);
     }
 
+    /* A network fault while reading through an ID3v2 tag answers FORMAT: FMOD's MPEG codec skips the tag with a new
+       request, so it would not wait on this transport. */
+    {
+        static unsigned char buf[100000 + 20 * 417];
+        unsigned int         tagBody = 100000 - 10;
+        unsigned int         n;
+
+        memset(buf, 0, sizeof(buf));
+        memcpy(buf, "ID3\x04\x00\x00", 6);
+        buf[6] = (unsigned char)((tagBody >> 21) & 0x7F);
+        buf[7] = (unsigned char)((tagBody >> 14) & 0x7F);
+        buf[8] = (unsigned char)((tagBody >> 7) & 0x7F);
+        buf[9] = (unsigned char)(tagBody & 0x7F);
+        for (n = 100000; n + 417 <= sizeof(buf); n += 417) {   /* MPEG-1 Layer III, as in test_rejects */
+            buf[n] = 0xFF; buf[n + 1] = 0xFB; buf[n + 2] = 0x90; buf[n + 3] = 0x64;
+        }
+        fake_file_init(&file, buf, sizeof(buf));
+        file.failAtPos = FMOD_ERR_NET_SOCKET_ERROR;
+        file.failPos   = 50000;
+        res = open_file(&file, 0);
+        CHECK(res == FMOD_ERR_FORMAT, "socket error inside a 100 KB ID3v2 tag: open %d, want FMOD_ERR_FORMAT", res);
+        if (res == FMOD_OK) {
+            close_file(&file);
+        }
+    }
+
     CHECK(fake_live_allocations() == 0, "audit round 3: %ld allocations leaked", fake_live_allocations());
 }
 
