@@ -70,11 +70,14 @@ codec's data ends sooner, cuts the tail when the data runs longer, and never ask
   silence (under −66 dBFS) to the declared end. A server must never cut a body.
 - **An M4A's data ending before its declared length** (a failed decoder, a cut before the ring wraps):
   ampaac plays silence to that length. What FMOD itself plays past a codec's early end is unmeasured.
-- **Errors:** open returns `FMOD_ERR_FORMAT` for data that is not AAC, and for a file error before the data
-  shows `ftyp` or an ADTS frame chain: FMOD's codec API treats `FMOD_ERR_FORMAT` as "not this format" and
-  tries its next codec (an MP3's ID3v2 skip is a hard seek); what FMOD does with any other error from a
-  probe is unmeasured. After that, a failed read is retried once at once from the same offset (on a
-  netstream, a new request, as FMOD's MP3 codec does), except after a timeout
+- **Errors:** open returns `FMOD_ERR_FORMAT` for data that is not AAC. Before the data shows `ftyp` or an
+  ADTS frame chain, a network failure (`FMOD_ERR_NET_SOCKET_ERROR`, `FMOD_ERR_NET_CONNECT`, `FMOD_ERR_HTTP*`)
+  ends the open as it is, and any other file error answers `FMOD_ERR_FORMAT`, which FMOD's codec API treats
+  as "not this format": it tries its next codec, which may still read the stream its own way (an MP3's ID3v2
+  skip is a hard seek). Measured (FMOD 2.03.14, network timeout 3 s): FMOD's next codec meets the same
+  stall, so answering `FMOD_ERR_FORMAT` for a stall inside the first 8 KB failed the open after two
+  timeouts instead of one, with the same final result. After that, a failed read is retried once at once
+  from the same offset (on a netstream, a new request, as FMOD's MP3 codec does), except after a timeout
   (`FMOD_ERR_NET_SOCKET_ERROR`), which a retry would only repeat; a second failure passes through unchanged.
 - **Damage and limits:** a stream with a size or an access-unit table conceals damaged frames and decodes
   what follows. An ADTS stream of unknown size (a live source) ends after 10 s of unbroken concealment

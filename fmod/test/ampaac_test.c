@@ -777,14 +777,30 @@ static void test_rejects(void) {
         free(m4a.data);
     }
 
-    /* Before the data shows ftyp or an ADTS chain, a file error answers FMOD_ERR_FORMAT: FMOD's own codecs
-       still get their turn. */
-    fake_file_init(&file, buf, sizeof(buf));
-    file.failAtPos = FMOD_ERR_NET_SOCKET_ERROR;
-    file.failPos   = 0;
-    res = open_file(&file, 0);
-    CHECK(res == FMOD_ERR_FORMAT, "socket error before any AAC evidence: %d, want FMOD_ERR_FORMAT", res);
-    CHECK(fake_live_allocations() == 0, "socket error: %ld allocations leaked", fake_live_allocations());
+    /* Before the data shows ftyp or an ADTS chain, a network failure ends the open as it is (FMOD's next codec
+       would wait on the same transport); any other file error answers FMOD_ERR_FORMAT, so FMOD's own codecs
+       still get their turn. Reads come in 64-byte pieces, so a fault at 128 lands inside the ADTS probe window,
+       before the first chain completes. */
+    {
+        static const struct { FMOD_RESULT fault; unsigned int at; FMOD_RESULT want; const char* what; } cases[] = {
+            { FMOD_ERR_NET_SOCKET_ERROR,  0,   FMOD_ERR_NET_SOCKET_ERROR,  "socket error at 0" },
+            { FMOD_ERR_HTTP_SERVER_ERROR, 0,   FMOD_ERR_HTTP_SERVER_ERROR, "server error at 0" },
+            { FMOD_ERR_FILE_BAD,          0,   FMOD_ERR_FORMAT,            "file error at 0" },
+            { FMOD_ERR_NET_SOCKET_ERROR,  128, FMOD_ERR_NET_SOCKET_ERROR,  "socket error in the ADTS probe" },
+            { FMOD_ERR_FILE_COULDNOTSEEK, 128, FMOD_ERR_FORMAT,            "refused seek in the ADTS probe" },
+        };
+        blob adts = load("adts_lc_44k_stereo.aac");
+        for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+            fake_file_init(&file, adts.data, adts.size);
+            file.maxChunk  = 64;
+            file.failAtPos = cases[c].fault;
+            file.failPos   = cases[c].at;
+            res = open_file(&file, 0);
+            CHECK(res == cases[c].want, "%s before any AAC evidence: open %d, want %d", cases[c].what, res, cases[c].want);
+            CHECK(fake_live_allocations() == 0, "%s: %ld allocations leaked", cases[c].what, fake_live_allocations());
+        }
+        free(adts.data);
+    }
 
     /* After ftyp it is a load failure: the moov read at the end of the file fails. */
     {

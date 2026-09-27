@@ -181,8 +181,8 @@ FMOD_RESULT ampaac_adts_open(ampaac_codec* aac) {
     unsigned int         frames = 0;
     ampaac_adts_header   hdr;
 
-    if (found < 0) {
-        return FMOD_ERR_FORMAT;   /* no chain: not established as ADTS, even when the read failed */
+    if (found < 0) {   /* no chain: not established as ADTS */
+        return rd->fault != FMOD_OK ? ampaac_probe_fault(rd->fault) : FMOD_ERR_FORMAT;
     }
 
     /* Mean frame size over the head window seeds the length estimate until the index outgrows it. */

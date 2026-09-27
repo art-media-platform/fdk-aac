@@ -2,7 +2,8 @@
  * ampaac — FMOD codec plugin: AAC in ADTS or MP4/M4A, decoded by the Fraunhofer FDK AAC decoder.
  *
  * FMOD opens every sound through its codec list in priority order; open() claims only streams it can
- * decode and answers FMOD_ERR_FORMAT for everything else, leaving no side effects.
+ * decode and answers FMOD_ERR_FORMAT for everything else, leaving no side effects. A network failure before
+ * the data shows AAC ends the open as it is (ampaac_probe_fault).
  *
  * Length. FMOD 2.03 ends a stream at the lengthpcm declared at open: it plays on to that length when the
  * data ends sooner and cuts the tail when it ends later, and it never re-reads the length or calls
@@ -520,17 +521,22 @@ static FMOD_RESULT F_CALL codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode
 
     /* FMOD hands each codec the file at 0; a netstream turns any seek into a reconnect, so only rewind
        when the position says otherwise. */
-    if ((FMOD_CODEC_FILE_TELL(state, &pos) != FMOD_OK || pos != 0)
-        && FMOD_CODEC_FILE_SEEK(state, 0, FMOD_CODEC_SEEK_METHOD_SET) != FMOD_OK) {
-        return fail_open(state, FMOD_ERR_FORMAT);
+    if (FMOD_CODEC_FILE_TELL(state, &pos) != FMOD_OK || pos != 0) {
+        res = FMOD_CODEC_FILE_SEEK(state, 0, FMOD_CODEC_SEEK_METHOD_SET);
+        if (res != FMOD_OK) {
+            return fail_open(state, ampaac_probe_fault(res));
+        }
     }
     ampaac_reader_init(&aac->reader, state);
     skip_id3v2(&aac->reader);
 
-    /* Until the data shows ftyp or an ADTS chain it is not known to be AAC: a file error here answers
-       FMOD_ERR_FORMAT, so FMOD's own codecs still get their turn (an MP3's ID3v2 skip is a hard seek). */
+    /* Until the data shows ftyp or an ADTS chain it is not known to be AAC: FMOD's own codecs still get their
+       turn after a file error here (an MP3's ID3v2 skip is a hard seek), not after a network one. */
     avail = ampaac_reader_peek(&aac->reader, 12, &head);
-    if (aac->reader.fault != FMOD_OK || foreign_magic(head, avail)) {
+    if (aac->reader.fault != FMOD_OK) {
+        return fail_open(state, ampaac_probe_fault(aac->reader.fault));
+    }
+    if (foreign_magic(head, avail)) {
         return fail_open(state, FMOD_ERR_FORMAT);
     }
     aac->endPcm = AMPAAC_UNKNOWN;

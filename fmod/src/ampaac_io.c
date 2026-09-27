@@ -43,6 +43,21 @@ static void source_read(ampaac_reader* rd, unsigned int at, unsigned char* into,
     }
 }
 
+FMOD_RESULT ampaac_probe_fault(FMOD_RESULT fault) {
+    switch (fault) {
+        case FMOD_ERR_NET_SOCKET_ERROR:
+        case FMOD_ERR_NET_CONNECT:
+        case FMOD_ERR_HTTP:
+        case FMOD_ERR_HTTP_ACCESS:
+        case FMOD_ERR_HTTP_PROXY_AUTH:
+        case FMOD_ERR_HTTP_SERVER_ERROR:
+        case FMOD_ERR_HTTP_TIMEOUT:
+            return fault;
+        default:
+            return FMOD_ERR_FORMAT;
+    }
+}
+
 /* Consumes the bytes between the window's end and a read position set past it. */
 static void read_through_gap(ampaac_reader* rd) {
     unsigned int end = rd->bufStart + rd->bufLen;

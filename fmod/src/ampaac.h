@@ -49,6 +49,10 @@ void         ampaac_reader_init(ampaac_reader* rd, FMOD_CODEC_STATE* codec);
 unsigned int ampaac_reader_peek(ampaac_reader* rd, unsigned int want, const unsigned char** out);
 void         ampaac_reader_skip(ampaac_reader* rd, unsigned int count);
 FMOD_RESULT  ampaac_reader_seek(ampaac_reader* rd, unsigned int pos);
+/* The answer to a file error met before the data shows ftyp or an ADTS chain: a network failure as it is (FMOD's
+   next codec would wait on the same transport), anything else FMOD_ERR_FORMAT (the next codec may still read
+   the stream its own way). */
+FMOD_RESULT  ampaac_probe_fault(FMOD_RESULT fault);
 
 /* ADTS fixed + variable header (ISO/IEC 13818-7 §6.2 / ISO/IEC 14496-3 §1.A.2.2). */
 typedef struct ampaac_adts_header {
