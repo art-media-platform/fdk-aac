@@ -1,0 +1,433 @@
+/*
+ * ampaac host tests: the codec driven through its FMOD description against fake_fmod's memory files.
+ * Usage: ampaac_test <fixtures dir>
+ */
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "fake_fmod.h"
+#include "ampaac.h"
+
+F_EXPORT FMOD_CODEC_DESCRIPTION* F_CALL AMPAAC_GetCodecDescription(void);
+
+static int failures;
+static int checks;
+
+#define CHECK(cond, ...)                                                   \
+    do {                                                                   \
+        checks++;                                                          \
+        if (!(cond)) {                                                     \
+            failures++;                                                    \
+            printf("  FAIL %s:%d: ", __FILE__, __LINE__);                  \
+            printf(__VA_ARGS__);                                           \
+            printf("\n");                                                  \
+        }                                                                  \
+    } while (0)
+
+typedef struct blob {
+    unsigned char* data;
+    unsigned int   size;
+} blob;
+
+typedef struct decoded {
+    int          rate;
+    int          channels;
+    unsigned int frames;
+    unsigned int lengthAtOpen;
+    unsigned int lengthAtEnd;
+    short*       pcm;
+} decoded;
+
+typedef struct fixture {
+    const char* name;
+    int         rate;
+    int         channels;
+} fixture;
+
+static const fixture fixtures[] = {
+    { "adts_lc_44k_stereo.aac",   44100, 2 },
+    { "adts_lc_22k_mono.aac",     22050, 1 },
+    { "adts_he_48k_stereo.aac",   48000, 2 },
+    { "adts_hev2_48k_stereo.aac", 48000, 2 },
+};
+
+static const char* fixtureDir;
+
+static blob load(const char* name) {
+    blob  out = { NULL, 0 };
+    char  path[1024];
+    FILE* file;
+    long  size;
+
+    snprintf(path, sizeof(path), "%s/%s", fixtureDir, name);
+    file = fopen(path, "rb");
+    if (!file) {
+        printf("  cannot open %s\n", path);
+        exit(2);
+    }
+    fseek(file, 0, SEEK_END);
+    size = ftell(file);
+    fseek(file, 0, SEEK_SET);
+    out.data = (unsigned char*)malloc((size_t)size + 1);
+    out.size = (unsigned int)fread(out.data, 1, (size_t)size, file);
+    fclose(file);
+    return out;
+}
+
+static FMOD_CODEC_DESCRIPTION* codec(void) {
+    return AMPAAC_GetCodecDescription();
+}
+
+static FMOD_RESULT open_file(fake_file* file) {
+    return codec()->open(&file->state, FMOD_CREATESTREAM, NULL);
+}
+
+static void close_file(fake_file* file) {
+    codec()->close(&file->state);
+}
+
+/* Reads until EOF in `chunk`-frame requests; out->pcm holds every frame. */
+static FMOD_RESULT read_all(fake_file* file, unsigned int chunk, decoded* out) {
+    unsigned int cap = 1 << 16;
+    int          channels = file->state.waveformat->channels;
+
+    out->rate     = file->state.waveformat->frequency;
+    out->channels = channels;
+    out->frames   = 0;
+    out->pcm      = (short*)malloc((size_t)cap * channels * sizeof(short));
+    for (;;) {
+        unsigned int got = 0;
+        FMOD_RESULT  res;
+
+        if (out->frames + chunk > cap) {
+            cap *= 2;
+            out->pcm = (short*)realloc(out->pcm, (size_t)cap * channels * sizeof(short));
+        }
+        res = codec()->read(&file->state, out->pcm + (size_t)out->frames * channels, chunk, &got);
+        out->frames += got;
+        if (res == FMOD_ERR_FILE_EOF) {
+            return FMOD_OK;
+        }
+        if (res != FMOD_OK) {
+            return res;
+        }
+        if (got == 0) {
+            return FMOD_ERR_INTERNAL;   /* FMOD_OK with nothing would spin FMOD's stream thread */
+        }
+    }
+}
+
+static unsigned int length_pcm(fake_file* file) {
+    unsigned int length = 0;
+    codec()->getlength(&file->state, &length, FMOD_TIMEUNIT_PCM);
+    return length;
+}
+
+static FMOD_RESULT decode_blob(const unsigned char* data, unsigned int size, unsigned int chunk, decoded* out) {
+    fake_file   file;
+    FMOD_RESULT res;
+
+    memset(out, 0, sizeof(*out));
+    fake_file_init(&file, data, size);
+    res = open_file(&file);
+    if (res != FMOD_OK) {
+        return res;
+    }
+    out->lengthAtOpen = file.state.waveformat->lengthpcm;
+    res = read_all(&file, chunk, out);
+    out->lengthAtEnd = length_pcm(&file);
+    close_file(&file);
+    return res;
+}
+
+/* Frequency of one channel from positive-going zero crossings over [from, from + count). */
+static double tone_hz(const decoded* d, int channel, unsigned int from, unsigned int count) {
+    unsigned int crossings = 0;
+    unsigned int n;
+
+    if (from + count > d->frames) {
+        return 0;
+    }
+    for (n = from + 1; n < from + count; n++) {
+        short prev = d->pcm[(size_t)(n - 1) * d->channels + channel];
+        short cur  = d->pcm[(size_t)n * d->channels + channel];
+        if (prev < 0 && cur >= 0) {
+            crossings++;
+        }
+    }
+    return (double)crossings * d->rate / count;
+}
+
+static double rms(const short* pcm, unsigned int samples) {
+    double       sum = 0;
+    unsigned int n;
+    for (n = 0; n < samples; n++) {
+        sum += (double)pcm[n] * pcm[n];
+    }
+    return samples ? sqrt(sum / samples) : 0;
+}
+
+static void check_tones(const decoded* d, const char* what) {
+    unsigned int from  = (unsigned int)d->rate;          /* 1.0 s .. 2.0 s */
+    unsigned int count = (unsigned int)d->rate;
+    double       left  = tone_hz(d, 0, from, count);
+
+    CHECK(fabs(left - 440) < 440 * 0.015, "%s: left tone %.1f Hz, want 440", what, left);
+    if (d->channels == 2) {
+        double right = tone_hz(d, 1, from, count);
+        CHECK(fabs(right - 660) < 660 * 0.015, "%s: right tone %.1f Hz, want 660", what, right);
+    }
+}
+
+static void test_fixture(const fixture* fx) {
+    blob         src = load(fx->name);
+    decoded      whole;
+    fake_file    file;
+    FMOD_RESULT  res;
+    unsigned int want = (unsigned int)(3.0 * fx->rate);
+
+    printf("%s\n", fx->name);
+
+    res = decode_blob(src.data, src.size, 4096, &whole);
+    CHECK(res == FMOD_OK, "decode: result %d", res);
+    CHECK(whole.rate == fx->rate, "rate %d, want %d", whole.rate, fx->rate);
+    CHECK(whole.channels == fx->channels, "channels %d, want %d", whole.channels, fx->channels);
+    CHECK(whole.frames >= want && whole.frames <= want + want / 10,
+          "decoded %u frames, want 3.0 s (%u) plus encoder padding", whole.frames, want);
+    CHECK(whole.lengthAtEnd == whole.frames, "length at EOF %u != decoded %u", whole.lengthAtEnd, whole.frames);
+    CHECK(whole.lengthAtOpen != AMPAAC_UNKNOWN
+          && fabs((double)whole.lengthAtOpen - whole.frames) < whole.frames * 0.15,
+          "length estimate at open %u vs decoded %u", whole.lengthAtOpen, whole.frames);
+    check_tones(&whole, "whole");
+
+    /* Trickling reads decode bit-identically. */
+    {
+        decoded trickle;
+        fake_file_init(&file, src.data, src.size);
+        file.maxChunk = 97;
+        res = open_file(&file);
+        CHECK(res == FMOD_OK, "trickle open %d", res);
+        if (res == FMOD_OK) {
+            read_all(&file, 1000, &trickle);
+            close_file(&file);
+            CHECK(trickle.frames == whole.frames
+                  && memcmp(trickle.pcm, whole.pcm, (size_t)whole.frames * whole.channels * sizeof(short)) == 0,
+                  "trickled decode differs (%u vs %u frames)", trickle.frames, whole.frames);
+            free(trickle.pcm);
+        }
+    }
+
+    /* Seek inside the index (decoded region): lands on the continuous decode. */
+    {
+        decoded      tail;
+        unsigned int target = (unsigned int)(1.3 * fx->rate);
+        unsigned int compare = 4096;
+        double       worst = 0;
+        unsigned int n;
+
+        fake_file_init(&file, src.data, src.size);
+        open_file(&file);
+        read_all(&file, 4096, &tail);
+        free(tail.pcm);
+        res = codec()->setposition(&file.state, 0, target, FMOD_TIMEUNIT_PCM);
+        CHECK(res == FMOD_OK, "setposition %d", res);
+        read_all(&file, 4096, &tail);
+        CHECK(tail.frames == whole.frames - target, "after seek %u frames, want %u", tail.frames, whole.frames - target);
+        for (n = 0; n < compare * whole.channels && n < tail.frames * (unsigned int)whole.channels; n++) {
+            double diff = fabs((double)tail.pcm[n] - whole.pcm[(size_t)target * whole.channels + n]);
+            if (diff > worst) {
+                worst = diff;
+            }
+        }
+        printf("  exact seek: max |diff| %.0f over %u frames\n", worst, compare);
+        if (worst > 4) {
+            /* Where the divergence sits, and the lag that best aligns the two decodes. */
+            unsigned int window;
+            int          lag;
+            int          bestLag = 0;
+            double       bestErr = 1e30;
+            for (window = 0; window < compare; window += 512) {
+                double w = 0;
+                for (n = window * whole.channels; n < (window + 512) * whole.channels && n < tail.frames * (unsigned int)whole.channels; n++) {
+                    double diff = fabs((double)tail.pcm[n] - whole.pcm[(size_t)target * whole.channels + n]);
+                    if (diff > w) {
+                        w = diff;
+                    }
+                }
+                printf("    frames %4u..%4u max |diff| %.0f\n", window, window + 511, w);
+            }
+            for (lag = -64; lag <= 64; lag++) {
+                double err = 0;
+                for (n = 2048; n < 4096; n++) {
+                    double diff = (double)tail.pcm[(size_t)n * whole.channels] - whole.pcm[(size_t)(target + n + lag) * whole.channels];
+                    err += diff * diff;
+                }
+                if (err < bestErr) {
+                    bestErr = err;
+                    bestLag = lag;
+                }
+            }
+            printf("    best alignment lag %d (residual rms %.1f)\n", bestLag, sqrt(bestErr / 2048));
+        }
+        /* LC lands bit-exact; SBR/PS leave a few LSB of fixed-point residue after the pre-roll. */
+        CHECK(worst <= 4, "exact seek diverges from the continuous decode (max |diff| %.0f)", worst);
+        free(tail.pcm);
+        close_file(&file);
+    }
+
+    /* Seek before anything was decoded: lands by estimate, audio continues. */
+    {
+        decoded      tail;
+        unsigned int target = (unsigned int)(1.0 * fx->rate);
+
+        fake_file_init(&file, src.data, src.size);
+        open_file(&file);
+        res = codec()->setposition(&file.state, 0, target, FMOD_TIMEUNIT_PCM);
+        CHECK(res == FMOD_OK, "estimated setposition %d", res);
+        read_all(&file, 4096, &tail);
+        CHECK(tail.frames > whole.frames - target - 3 * 2048 && tail.frames < whole.frames - target + 3 * 2048,
+              "after estimated seek %u frames, want about %u", tail.frames, whole.frames - target);
+        CHECK(rms(tail.pcm, 4096 * tail.channels) > 2000, "silence after estimated seek");
+        free(tail.pcm);
+        close_file(&file);
+    }
+
+    /* Source without a size: length unknown (FmodPlayer treats it as live), decode unchanged. */
+    {
+        decoded live;
+        fake_file_init(&file, src.data, src.size);
+        file.sizeUnknown = 1;
+        res = open_file(&file);
+        CHECK(res == FMOD_OK, "unknown-size open %d", res);
+        if (res == FMOD_OK) {
+            CHECK(file.state.waveformat->lengthpcm == AMPAAC_UNKNOWN, "unknown-size length %u", file.state.waveformat->lengthpcm);
+            read_all(&file, 4096, &live);
+            CHECK(live.frames == whole.frames, "unknown-size decoded %u, want %u", live.frames, whole.frames);
+            free(live.pcm);
+            close_file(&file);
+        }
+    }
+
+    /* ICY cut: the capture starts mid-frame. */
+    {
+        unsigned int   junk = 700;
+        unsigned char* cut = (unsigned char*)malloc(src.size + junk);
+        decoded        icy;
+        unsigned int   n;
+        unsigned int   seed = 12345;
+
+        for (n = 0; n < junk; n++) {
+            seed = seed * 1103515245u + 12345u;
+            cut[n] = (unsigned char)(seed >> 16);
+        }
+        memcpy(cut + junk, src.data, src.size);
+        res = decode_blob(cut, src.size + junk, 4096, &icy);
+        CHECK(res == FMOD_OK && icy.frames == whole.frames, "junk-prefixed decode %d, %u frames (want %u)", res, icy.frames, whole.frames);
+        free(icy.pcm);
+
+        /* ID3v2 ahead of the frames. */
+        memset(cut, 0, junk);
+        memcpy(cut, "ID3\x04\x00\x00\x00\x00\x05\x32", 10);   /* synchsafe 0x2B2 = 690 bytes of tag body */
+        res = decode_blob(cut, src.size + junk, 4096, &icy);
+        CHECK(res == FMOD_OK && icy.frames == whole.frames, "ID3-prefixed decode %d, %u frames (want %u)", res, icy.frames, whole.frames);
+        free(icy.pcm);
+        free(cut);
+    }
+
+    /* Truncated mid-frame and corrupted in the middle: decode completes. */
+    {
+        unsigned char* bad = (unsigned char*)malloc(src.size);
+        decoded        damaged;
+
+        res = decode_blob(src.data, src.size - 333, 4096, &damaged);
+        CHECK(res == FMOD_OK && damaged.frames < whole.frames && damaged.frames > whole.frames / 2,
+              "truncated decode %d, %u frames", res, damaged.frames);
+        free(damaged.pcm);
+
+        memcpy(bad, src.data, src.size);
+        memset(bad + src.size / 2, 0, 200);
+        res = decode_blob(bad, src.size, 4096, &damaged);
+        CHECK(res == FMOD_OK && damaged.frames + 8 * 2048 > whole.frames && damaged.frames <= whole.frames + 8 * 2048,
+              "corrupted decode %d, %u frames (clean %u)", res, damaged.frames, whole.frames);
+        free(damaged.pcm);
+        free(bad);
+    }
+
+    CHECK(fake_live_allocations() == 0, "%ld allocations leaked", fake_live_allocations());
+    free(whole.pcm);
+    free(src.data);
+}
+
+static void expect_format_error(const char* what, const unsigned char* data, unsigned int size) {
+    fake_file   file;
+    FMOD_RESULT res;
+
+    fake_file_init(&file, data, size);
+    res = open_file(&file);
+    CHECK(res == FMOD_ERR_FORMAT, "%s: open %d, want FMOD_ERR_FORMAT", what, res);
+    if (res == FMOD_OK) {
+        close_file(&file);
+    }
+    CHECK(fake_live_allocations() == 0, "%s: %ld allocations leaked", what, fake_live_allocations());
+}
+
+static void test_rejects(void) {
+    static unsigned char buf[65536];
+    unsigned int         n;
+    unsigned int         seed = 99;
+    fake_file            file;
+    FMOD_RESULT          res;
+
+    printf("rejects\n");
+
+    /* MPEG-1 Layer III, 128 kbps, 44.1 kHz: 417-byte frames. */
+    memset(buf, 0, sizeof(buf));
+    for (n = 0; n + 417 <= 20 * 417; n += 417) {
+        buf[n] = 0xFF; buf[n + 1] = 0xFB; buf[n + 2] = 0x90; buf[n + 3] = 0x64;
+    }
+    expect_format_error("mp3", buf, 20 * 417);
+
+    memset(buf, 0, sizeof(buf));
+    memcpy(buf, "RIFF\x24\x00\x01\x00WAVEfmt ", 16);
+    expect_format_error("wav", buf, 4096);
+    memcpy(buf, "OggS", 4);
+    expect_format_error("ogg", buf, 4096);
+    memcpy(buf, "\x00\x00\x00\x20" "ftypM4A ", 12);
+    expect_format_error("mp4 (not yet)", buf, 4096);
+
+    for (n = 0; n < sizeof(buf); n++) {
+        seed = seed * 1103515245u + 12345u;
+        buf[n] = (unsigned char)(seed >> 16);
+    }
+    expect_format_error("random", buf, sizeof(buf));
+    expect_format_error("empty", buf, 0);
+    expect_format_error("tiny", buf, 5);
+
+    /* A file error during the probe is a load failure, not a format verdict. */
+    fake_file_init(&file, buf, sizeof(buf));
+    file.failAtPos = FMOD_ERR_NET_SOCKET_ERROR;
+    file.failPos   = 0;
+    res = open_file(&file);
+    CHECK(res == FMOD_ERR_NET_SOCKET_ERROR, "socket error at open: %d, want FMOD_ERR_NET_SOCKET_ERROR", res);
+    CHECK(fake_live_allocations() == 0, "socket error: %ld allocations leaked", fake_live_allocations());
+}
+
+int main(int argc, char** argv) {
+    unsigned int i;
+
+    if (argc < 2) {
+        fprintf(stderr, "usage: ampaac_test <fixtures dir>\n");
+        return 2;
+    }
+    fixtureDir = argv[1];
+
+    for (i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i++) {
+        test_fixture(&fixtures[i]);
+    }
+    test_rejects();
+
+    printf("%d checks, %d failures\n", checks, failures);
+    return failures ? 1 : 0;
+}
