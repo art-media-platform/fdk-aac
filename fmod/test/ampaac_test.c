@@ -1445,6 +1445,46 @@ static void test_audit_round3(void) {
         free(m4a.data);
     }
 
+    /* An unsized stream's reader offsets wrap past 4 GiB: peeks and read-throughs across the wrap return the source's
+       bytes in order, with no source seek. */
+    {
+        static unsigned char pattern[4093];
+        ampaac_reader        rd;
+        unsigned int         i;
+        unsigned int         off = 0;
+        int                  wrong = 0;
+
+        for (i = 0; i < sizeof(pattern); i++) {
+            pattern[i] = (unsigned char)(i * 7 + 3);
+        }
+        fake_file_init(&file, pattern, sizeof(pattern));
+        file.sizeUnknown = 1;
+        file.cyclic      = 1;
+        ampaac_reader_init(&rd, &file.state);
+        rd.bufStart = rd.pos = 0xFFFF0000u;   /* as if ~4 GiB had been read */
+        while (off < 262144 && !wrong) {
+            const unsigned char* p;
+            unsigned int         step = 700 + (off * 13) % 20000;   /* inside the window, and past it */
+            unsigned int         got = ampaac_reader_peek(&rd, 512, &p);
+
+            if (got < 512) {
+                wrong = 1;
+                break;
+            }
+            for (i = 0; i < got; i++) {
+                if (p[i] != pattern[(off + i) % sizeof(pattern)]) {
+                    wrong = 1;
+                    break;
+                }
+            }
+            ampaac_reader_skip(&rd, step);
+            off += step;
+        }
+        CHECK(!wrong && file.seeks == 0 && rd.fault == FMOD_OK,
+              "reader across the 4 GiB wrap: %s at +%u, %u source seeks, %u reads, fault %d",
+              wrong ? "wrong bytes" : "bytes in order", off, file.seeks, file.reads, rd.fault);
+    }
+
     CHECK(fake_live_allocations() == 0, "audit round 3: %ld allocations leaked", fake_live_allocations());
 }
 

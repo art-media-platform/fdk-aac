@@ -77,6 +77,15 @@ static FMOD_RESULT F_CALL fake_read(FMOD_CODEC_STATE* state, void* buffer, unsig
     if (file->maxChunk && want > file->maxChunk) {
         want = file->maxChunk;
     }
+    if (file->cyclic && file->size) {
+        unsigned int i;
+        for (i = 0; i < want; i++) {
+            ((unsigned char*)buffer)[i] = file->data[(file->pos + i) % file->size];
+        }
+        file->pos += want;
+        *bytesread = want;
+        return FMOD_OK;
+    }
     if (want > left) {
         want = left;
     }

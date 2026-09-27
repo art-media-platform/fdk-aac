@@ -14,6 +14,7 @@ typedef struct fake_file {
     unsigned int               size;
     unsigned int               pos;
     int                        sizeUnknown;  /* FILE_SIZE reports 0, like a source without Content-Length */
+    int                        cyclic;       /* reads loop over data without end, like a live stream */
     unsigned int               maxChunk;     /* cap per FILE_READ call (0 = none), like a trickling source */
     FMOD_RESULT                failAtPos;    /* error returned once pos reaches failPos (FMOD_OK = never) */
     unsigned int               failPos;

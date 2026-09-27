@@ -429,6 +429,9 @@ FMOD_RESULT ampaac_adts_seek(ampaac_codec* aac, unsigned int targetPcm) {
         if (rd->size != AMPAAC_UNKNOWN && offset >= rd->size) {
             offset = rd->size;
         }
+        if (offset >= AMPAAC_UNKNOWN) {
+            offset = AMPAAC_UNKNOWN - 1;   /* FMOD's file offsets are 32-bit */
+        }
         res = ampaac_reader_seek(rd, (unsigned int)offset);
         if (res != FMOD_OK) {
             return res;

@@ -58,19 +58,21 @@ FMOD_RESULT ampaac_probe_fault(FMOD_RESULT fault) {
     }
 }
 
-/* Consumes the bytes between the window's end and a read position set past it. */
+/* Consumes the bytes between the window's end and a read position set past it. Offsets compare as differences:
+   an unsized stream's offsets wrap past 4 GiB. */
 static void read_through_gap(ampaac_reader* rd) {
     unsigned int end = rd->bufStart + rd->bufLen;
+    unsigned int gap = rd->pos - end;
 
-    while (end < rd->pos && !rd->atEnd && rd->fault == FMOD_OK) {
-        unsigned int gap = rd->pos - end;
+    while (gap > 0 && !rd->atEnd && rd->fault == FMOD_OK) {
         unsigned int got = 0;
         source_read(rd, end, rd->buf, gap < AMPAAC_READ_BUF ? gap : AMPAAC_READ_BUF, &got);
         end += got;
+        gap -= got;
     }
-    rd->bufStart = end < rd->pos ? end : rd->pos;
+    rd->bufStart = end;
     rd->bufLen   = 0;
-    rd->pos      = rd->bufStart;
+    rd->pos      = end;
 }
 
 /* Reads until `need` bytes are buffered past pos, or the source ends. Requests go out in 4 KB granules
@@ -98,7 +100,7 @@ unsigned int ampaac_reader_peek(ampaac_reader* rd, unsigned int want, const unsi
     if (want > AMPAAC_READ_BUF) {
         want = AMPAAC_READ_BUF;
     }
-    if (rd->pos > rd->bufStart + rd->bufLen) {
+    if (rd->pos - rd->bufStart > rd->bufLen) {
         read_through_gap(rd);
     }
 
@@ -126,14 +128,15 @@ FMOD_RESULT ampaac_reader_seek(ampaac_reader* rd, unsigned int pos) {
     unsigned int end = rd->bufStart + rd->bufLen;
     FMOD_RESULT  res;
 
-    if (pos >= rd->bufStart && pos <= end) {
+    if (pos - rd->bufStart <= rd->bufLen) {   /* differences: an unsized stream's offsets wrap past 4 GiB */
         rd->pos = pos;
         return FMOD_OK;
     }
     if (rd->size != AMPAAC_UNKNOWN && pos > rd->size) {
         pos = rd->size;
     }
-    if (pos > end && pos - end <= AMPAAC_READ_THROUGH && !rd->atEnd && rd->fault == FMOD_OK) {
+    if ((rd->size == AMPAAC_UNKNOWN || pos > end) && pos - end <= AMPAAC_READ_THROUGH && !rd->atEnd
+        && rd->fault == FMOD_OK) {
         rd->pos = pos;   /* read through on the next peek */
         return FMOD_OK;
     }
