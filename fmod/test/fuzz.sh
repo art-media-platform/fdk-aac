@@ -13,7 +13,7 @@ ARTIFACTS=${FUZZ_ARTIFACTS:-$FMOD_DIR/build/fuzz-artifacts}
 IMAGE=${FUZZ_IMAGE:-debian:bookworm-slim}
 
 mkdir -p "$CORPUS" "$ARTIFACTS"
-cp "$FMOD_DIR"/test/fixtures/*.aac "$CORPUS"/ 2>/dev/null || true
+cp "$FMOD_DIR"/test/fixtures/*.aac "$FMOD_DIR"/test/fixtures/*.m4a "$CORPUS"/ 2>/dev/null || true
 
 docker run --rm \
     -v "$FORK_DIR":/src:ro \
