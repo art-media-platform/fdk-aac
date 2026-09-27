@@ -14,7 +14,7 @@ long fake_live_allocations(void) {
     return liveAllocations;
 }
 
-static FMOD_RESULT F_CALLBACK fake_metadata(FMOD_CODEC_STATE* state, FMOD_TAGTYPE type, char* name, void* data,
+static FMOD_RESULT F_CALL fake_metadata(FMOD_CODEC_STATE* state, FMOD_TAGTYPE type, char* name, void* data,
                                             unsigned int len, FMOD_TAGDATATYPE datatype, int unique) {
     fake_file* file = (fake_file*)state;
     (void)unique;
@@ -31,7 +31,7 @@ static FMOD_RESULT F_CALLBACK fake_metadata(FMOD_CODEC_STATE* state, FMOD_TAGTYP
     return FMOD_OK;
 }
 
-static void* F_CALLBACK fake_alloc(unsigned int size, unsigned int align, const char* where, int line) {
+static void* F_CALL fake_alloc(unsigned int size, unsigned int align, const char* where, int line) {
     void* ptr = NULL;
     (void)where;
     (void)line;
@@ -45,7 +45,7 @@ static void* F_CALLBACK fake_alloc(unsigned int size, unsigned int align, const 
     return ptr;
 }
 
-static void F_CALLBACK fake_free(void* ptr, const char* where, int line) {
+static void F_CALL fake_free(void* ptr, const char* where, int line) {
     (void)where;
     (void)line;
     if (ptr) {
@@ -54,7 +54,7 @@ static void F_CALLBACK fake_free(void* ptr, const char* where, int line) {
     }
 }
 
-static void F_CALLBACK fake_log(FMOD_DEBUG_FLAGS level, const char* file, int line, const char* function, const char* format, ...) {
+static void F_CALL fake_log(FMOD_DEBUG_FLAGS level, const char* file, int line, const char* function, const char* format, ...) {
     (void)level;
     (void)file;
     (void)line;
@@ -62,7 +62,7 @@ static void F_CALLBACK fake_log(FMOD_DEBUG_FLAGS level, const char* file, int li
     (void)format;
 }
 
-static FMOD_RESULT F_CALLBACK fake_read(FMOD_CODEC_STATE* state, void* buffer, unsigned int sizebytes, unsigned int* bytesread) {
+static FMOD_RESULT F_CALL fake_read(FMOD_CODEC_STATE* state, void* buffer, unsigned int sizebytes, unsigned int* bytesread) {
     fake_file*   file = (fake_file*)state;
     unsigned int want = sizebytes;
     unsigned int left = file->pos < file->size ? file->size - file->pos : 0;
@@ -87,7 +87,7 @@ static FMOD_RESULT F_CALLBACK fake_read(FMOD_CODEC_STATE* state, void* buffer, u
     return FMOD_OK;
 }
 
-static FMOD_RESULT F_CALLBACK fake_seek(FMOD_CODEC_STATE* state, unsigned int pos, FMOD_CODEC_SEEK_METHOD method) {
+static FMOD_RESULT F_CALL fake_seek(FMOD_CODEC_STATE* state, unsigned int pos, FMOD_CODEC_SEEK_METHOD method) {
     fake_file* file = (fake_file*)state;
     file->seeks++;
     if (method != FMOD_CODEC_SEEK_METHOD_SET) {
@@ -97,12 +97,12 @@ static FMOD_RESULT F_CALLBACK fake_seek(FMOD_CODEC_STATE* state, unsigned int po
     return FMOD_OK;
 }
 
-static FMOD_RESULT F_CALLBACK fake_tell(FMOD_CODEC_STATE* state, unsigned int* pos) {
+static FMOD_RESULT F_CALL fake_tell(FMOD_CODEC_STATE* state, unsigned int* pos) {
     *pos = ((fake_file*)state)->pos;
     return FMOD_OK;
 }
 
-static FMOD_RESULT F_CALLBACK fake_size(FMOD_CODEC_STATE* state, unsigned int* size) {
+static FMOD_RESULT F_CALL fake_size(FMOD_CODEC_STATE* state, unsigned int* size) {
     fake_file* file = (fake_file*)state;
     *size = file->sizeUnknown ? 0 : file->size;
     return FMOD_OK;

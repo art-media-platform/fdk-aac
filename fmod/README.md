@@ -75,12 +75,14 @@ where `libampaac.a` links into the app).
 
 ## Building
 
-**Prerequisite:** the FMOD Engine SDK's headers (`api/core/inc`: `fmod.h`, `fmod_codec.h`, …), passed as
-`FMOD_API_INC`. They come with the SDK under the FMOD EULA and are never committed here.
+**Prerequisite:** the FMOD Engine SDK's core headers (`api/core/inc`: `fmod.h`, `fmod_codec.h`, …). They
+come with the SDK under the FMOD EULA and are never committed here. The Makefile looks for the 2.03.14
+SDK unpacked at `~/Applications/fmodstudioapi20314mac`; `FMOD_API_INC=<dir>` points it elsewhere. Every leg
+builds against these headers: the plugin uses only FMOD's codec API.
 
 ```sh
-make osx FMOD_API_INC=<FMOD Engine SDK>/api/core/inc     # one leg: osx | ios | android | windows | linux
-make all FMOD_API_INC=...                                # every leg
+make osx                                                 # one leg: osx | ios | android | windows | linux
+make all                                                 # every leg
 make check                                               # check every built library (below)
 make install                                             # copy into UNITY_LIBS/<subdir>/ (temp + rename)
 ```
@@ -97,12 +99,13 @@ A build writes only under `build/`; `make install` copies into the Unity project
 | Linux | `Linux/x86_64/libampaac.so` | zig 0.16.0 | glibc 2.28 |
 
 The Android leg takes the NDK from the Unity editor of the AMP Unity project (`UNITY_PROJ`), or from
-`ANDROID_NDK=<ndk>`. The cross toolchains are pinned by release and archive hash and unpacked outside the
-repository; the Makefile looks for them under `~/Applications/<archive name>`, or at `LLVM_MINGW_ROOT` and
-`ZIG`:
+`ANDROID_NDK=<ndk>`. The FMOD SDK and the cross toolchains are pinned by release and download hash and
+unpacked outside the repository; the Makefile looks for them under `~/Applications/<download name>`, or at
+`FMOD_API_INC`, `LLVM_MINGW_ROOT` and `ZIG`:
 
-| Toolchain | Archive | SHA-256 |
+| Toolchain | Download | SHA-256 |
 |---|---|---|
+| FMOD Engine 2.03.14 (build 164239) | `fmodstudioapi20314mac-installer.dmg` (fmod.com, account required; its `FMOD Programmers API` folder) | `75b7cf57861567b9e1a4a36034b6fbeb92a7c90da082574c6ca93777cfed46bb` |
 | llvm-mingw 20260922 (LLVM 23.1.2) | [`llvm-mingw-20260922-ucrt-macos-universal.tar.xz`](https://github.com/mstorsjo/llvm-mingw/releases/tag/20260922) | `52e5f5a7b131021d0c39a37a38fa380a1da7885cd04bd61afd0cd4ecfb8bc1f3` |
 | zig 0.16.0 | [`zig-aarch64-macos-0.16.0.tar.xz`](https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz) | `b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489` |
 

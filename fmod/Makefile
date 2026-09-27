@@ -10,10 +10,8 @@
 #   make install                                 copy every built library into the Unity libs tree
 #   make clean | help
 #
-# Required:
-#   FMOD_API_INC=<FMOD Engine SDK>/api/core/inc  (fmod.h, fmod_codec.h; never committed here)
-#
 # Overrides:
+#   FMOD_API_INC=<FMOD Engine SDK>/api/core/inc  (fmod.h, fmod_codec.h; never committed here)
 #   BUILD_TYPE=Release|Debug   BUILD_ROOT=<dir>   UNITY_LIBS=<dir>   CMAKE=<cmake>   GENERATOR=<gen>
 #   LLVM_MINGW_ROOT=<llvm-mingw>   ZIG=<zig>   FMOD_LINUX_LIB=<libfmodstudio.so>   VERBOSE=1
 #   SPIKE=1 (callback traces to stderr)
@@ -34,13 +32,13 @@ WORKSPACE    := $(patsubst %/,%,$(dir $(FORK_DIR)))
 UNITY_PROJ   ?= $(WORKSPACE)/amp.3D.unity
 UNITY_LIBS   ?= $(UNITY_PROJ)/Assets/art.media.platform/libs
 BUILD_ROOT   ?= $(FMOD_DIR)/build
-FMOD_API_INC ?=
 FMOD_LINUX_LIB ?= $(UNITY_PROJ)/Assets/Plugins/FMOD/platforms/linux/lib/x86_64/libfmodstudio.so
 
 unity-engine-path = $(shell python3 "$(UNITY_PROJ)/cmd/tools.py" --project-path "$(UNITY_PROJ)" --get-engine-path)
 ANDROID_NDK       = $(unity-engine-path)/PlaybackEngines/AndroidPlayer/NDK
 
-# Pinned cross toolchains (release + SHA-256 in README.md), unpacked outside the repository.
+# Pinned FMOD SDK and cross toolchains (release + SHA-256 in README.md), unpacked outside the repository.
+FMOD_API_INC    ?= $(HOME)/Applications/fmodstudioapi20314mac/api/core/inc
 LLVM_MINGW_ROOT ?= $(HOME)/Applications/llvm-mingw-20260922-ucrt-macos-universal
 ZIG             ?= $(HOME)/Applications/zig-aarch64-macos-0.16.0/zig
 

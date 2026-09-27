@@ -33,10 +33,10 @@ static const char ampaacIdent[] = "ampaac fdk-aac " AMPAAC_SOURCE_REV;
 
 #define WARN(state, ...) FMOD_CODEC_LOG((state), FMOD_DEBUG_LEVEL_WARNING, "ampaac", __VA_ARGS__)
 
-static FMOD_RESULT F_CALLBACK codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode, FMOD_CREATESOUNDEXINFO* exinfo);
-static FMOD_RESULT F_CALLBACK codec_close(FMOD_CODEC_STATE* state);
-static FMOD_RESULT F_CALLBACK codec_read(FMOD_CODEC_STATE* state, void* buffer, unsigned int samplesIn, unsigned int* samplesOut);
-static FMOD_RESULT F_CALLBACK codec_setposition(FMOD_CODEC_STATE* state, int subsound, unsigned int position, FMOD_TIMEUNIT unit);
+static FMOD_RESULT F_CALL codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode, FMOD_CREATESOUNDEXINFO* exinfo);
+static FMOD_RESULT F_CALL codec_close(FMOD_CODEC_STATE* state);
+static FMOD_RESULT F_CALL codec_read(FMOD_CODEC_STATE* state, void* buffer, unsigned int samplesIn, unsigned int* samplesOut);
+static FMOD_RESULT F_CALL codec_setposition(FMOD_CODEC_STATE* state, int subsound, unsigned int position, FMOD_TIMEUNIT unit);
 
 static FMOD_CODEC_DESCRIPTION ampaacDescription = {
     FMOD_CODEC_PLUGIN_VERSION,
@@ -378,7 +378,7 @@ static FMOD_RESULT fail_open(FMOD_CODEC_STATE* state, FMOD_RESULT res) {
     return res;
 }
 
-static FMOD_RESULT F_CALLBACK codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode, FMOD_CREATESOUNDEXINFO* exinfo) {
+static FMOD_RESULT F_CALL codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode, FMOD_CREATESOUNDEXINFO* exinfo) {
     ampaac_codec*        aac;
     const unsigned char* head;
     unsigned int         avail;
@@ -466,7 +466,7 @@ static FMOD_RESULT F_CALLBACK codec_open(FMOD_CODEC_STATE* state, FMOD_MODE user
     return FMOD_OK;
 }
 
-static FMOD_RESULT F_CALLBACK codec_close(FMOD_CODEC_STATE* state) {
+static FMOD_RESULT F_CALL codec_close(FMOD_CODEC_STATE* state) {
     ampaac_codec* aac = (ampaac_codec*)state->plugindata;
 
     if (!aac) {
@@ -485,7 +485,7 @@ static FMOD_RESULT F_CALLBACK codec_close(FMOD_CODEC_STATE* state) {
     return FMOD_OK;
 }
 
-static FMOD_RESULT F_CALLBACK codec_read(FMOD_CODEC_STATE* state, void* buffer, unsigned int samplesIn, unsigned int* samplesOut) {
+static FMOD_RESULT F_CALL codec_read(FMOD_CODEC_STATE* state, void* buffer, unsigned int samplesIn, unsigned int* samplesOut) {
     ampaac_codec* aac = (ampaac_codec*)state->plugindata;
     INT_PCM*      out = (INT_PCM*)buffer;
     unsigned int  produced = 0;
@@ -520,7 +520,7 @@ static FMOD_RESULT F_CALLBACK codec_read(FMOD_CODEC_STATE* state, void* buffer, 
     return FMOD_OK;
 }
 
-static FMOD_RESULT F_CALLBACK codec_setposition(FMOD_CODEC_STATE* state, int subsound, unsigned int position, FMOD_TIMEUNIT unit) {
+static FMOD_RESULT F_CALL codec_setposition(FMOD_CODEC_STATE* state, int subsound, unsigned int position, FMOD_TIMEUNIT unit) {
     ampaac_codec* aac = (ampaac_codec*)state->plugindata;
     FMOD_RESULT   res;
 
