@@ -9,6 +9,23 @@
 
 #include "ampaac.h"
 
+/* Offsets are modular: an unsized stream's offsets wrap past 4 GiB, and a position before the window reads as far
+   ahead of it. These two helpers are the only intended wraps, so the SAN build's unsigned-wrap trap still covers
+   every other line of ampaac. */
+#if defined(__clang__)
+__attribute__((no_sanitize("unsigned-integer-overflow")))
+#endif
+static unsigned int ahead_of(unsigned int pos, unsigned int from) {
+    return pos - from;
+}
+
+#if defined(__clang__)
+__attribute__((no_sanitize("unsigned-integer-overflow")))
+#endif
+static unsigned int offset_add(unsigned int pos, unsigned int count) {
+    return pos + count;
+}
+
 void ampaac_reader_init(ampaac_reader* rd, FMOD_CODEC_STATE* codec) {
     unsigned int size = 0;
 
@@ -58,16 +75,15 @@ FMOD_RESULT ampaac_probe_fault(FMOD_RESULT fault) {
     }
 }
 
-/* Consumes the bytes between the window's end and a read position set past it. Offsets compare as differences:
-   an unsized stream's offsets wrap past 4 GiB. */
+/* Consumes the bytes between the window's end and a read position set past it. */
 static void read_through_gap(ampaac_reader* rd) {
-    unsigned int end = rd->bufStart + rd->bufLen;
-    unsigned int gap = rd->pos - end;
+    unsigned int end = offset_add(rd->bufStart, rd->bufLen);
+    unsigned int gap = ahead_of(rd->pos, end);
 
     while (gap > 0 && !rd->atEnd && rd->fault == FMOD_OK) {
         unsigned int got = 0;
         source_read(rd, end, rd->buf, gap < AMPAAC_READ_BUF ? gap : AMPAAC_READ_BUF, &got);
-        end += got;
+        end = offset_add(end, got);
         gap -= got;
     }
     rd->bufStart = end;
@@ -79,7 +95,7 @@ static void read_through_gap(ampaac_reader* rd) {
    rather than a whole window: a rejected probe that read past FMOD's buffer costs a reconnect. */
 static void reader_fill(ampaac_reader* rd, unsigned int need) {
     while (!rd->atEnd && rd->fault == FMOD_OK) {
-        unsigned int have = rd->bufStart + rd->bufLen - rd->pos;
+        unsigned int have = ahead_of(offset_add(rd->bufStart, rd->bufLen), rd->pos);
         unsigned int room = AMPAAC_READ_BUF - rd->bufLen;
         unsigned int want;
         unsigned int got = 0;
@@ -88,7 +104,7 @@ static void reader_fill(ampaac_reader* rd, unsigned int need) {
             return;
         }
         want = (need - have + AMPAAC_READ_GRANULE - 1) / AMPAAC_READ_GRANULE * AMPAAC_READ_GRANULE;
-        source_read(rd, rd->bufStart + rd->bufLen, rd->buf + rd->bufLen, want < room ? want : room, &got);
+        source_read(rd, offset_add(rd->bufStart, rd->bufLen), rd->buf + rd->bufLen, want < room ? want : room, &got);
         rd->bufLen += got;
     }
 }
@@ -100,12 +116,12 @@ unsigned int ampaac_reader_peek(ampaac_reader* rd, unsigned int want, const unsi
     if (want > AMPAAC_READ_BUF) {
         want = AMPAAC_READ_BUF;
     }
-    if (rd->pos - rd->bufStart > rd->bufLen) {
+    if (ahead_of(rd->pos, rd->bufStart) > rd->bufLen) {
         read_through_gap(rd);
     }
 
     /* Keep the unread tail and slide it to the front when the window cannot hold `want` more bytes. */
-    offset = rd->pos - rd->bufStart;
+    offset = ahead_of(rd->pos, rd->bufStart);
     if (offset + want > AMPAAC_READ_BUF) {
         memmove(rd->buf, rd->buf + offset, rd->bufLen - offset);
         rd->bufLen  -= offset;
@@ -115,27 +131,27 @@ unsigned int ampaac_reader_peek(ampaac_reader* rd, unsigned int want, const unsi
 
     reader_fill(rd, want);
 
-    have = rd->bufStart + rd->bufLen - rd->pos;
+    have = ahead_of(offset_add(rd->bufStart, rd->bufLen), rd->pos);
     *out = rd->buf + offset;
     return have < want ? have : want;
 }
 
 void ampaac_reader_skip(ampaac_reader* rd, unsigned int count) {
-    ampaac_reader_seek(rd, rd->pos + count);
+    ampaac_reader_seek(rd, offset_add(rd->pos, count));
 }
 
 FMOD_RESULT ampaac_reader_seek(ampaac_reader* rd, unsigned int pos) {
-    unsigned int end = rd->bufStart + rd->bufLen;
+    unsigned int end = offset_add(rd->bufStart, rd->bufLen);
     FMOD_RESULT  res;
 
-    if (pos - rd->bufStart <= rd->bufLen) {   /* differences: an unsized stream's offsets wrap past 4 GiB */
+    if (ahead_of(pos, rd->bufStart) <= rd->bufLen) {
         rd->pos = pos;
         return FMOD_OK;
     }
     if (rd->size != AMPAAC_UNKNOWN && pos > rd->size) {
         pos = rd->size;
     }
-    if ((rd->size == AMPAAC_UNKNOWN || pos > end) && pos - end <= AMPAAC_READ_THROUGH && !rd->atEnd
+    if ((rd->size == AMPAAC_UNKNOWN || pos > end) && ahead_of(pos, end) <= AMPAAC_READ_THROUGH && !rd->atEnd
         && rd->fault == FMOD_OK) {
         rd->pos = pos;   /* read through on the next peek */
         return FMOD_OK;
