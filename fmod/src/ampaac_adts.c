@@ -187,6 +187,7 @@ FMOD_RESULT ampaac_adts_open(ampaac_codec* aac) {
 
     /* Mean frame size over the head window seeds the length estimate until the index outgrows it. */
     at = (unsigned int)found;
+    ampaac_adts_parse(head + at, avail - at, &aac->adtsFirst);
     while (at + ADTS_MIN_HEADER <= avail && ampaac_adts_parse(head + at, avail - at, &hdr)
            && at + hdr.frameLength <= avail) {
         bytes += hdr.frameLength;
@@ -305,6 +306,9 @@ static void hop_toward(ampaac_codec* aac, unsigned int target, unsigned int budg
                 aac->lengthExact = 1;
             }
             break;
+        }
+        if (hdr.sfIndex != aac->adtsFirst.sfIndex || hdr.profile != aac->adtsFirst.profile) {
+            break;   /* another rate or profile: its frames hold another PCM count (a channel change keeps it) */
         }
         framePcm = (unsigned int)aac->frameSize * hdr.rawBlocks;
         if (at.pcm + framePcm > target) {

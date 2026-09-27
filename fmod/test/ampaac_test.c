@@ -1373,6 +1373,35 @@ static void test_audit_round3(void) {
         free(tone.data);
     }
 
+    /* A short ADTS whose rate changes (HE-AAC 48 kHz, then LC 44.1 kHz) must not declare an exact length computed
+       from the first stream's frame size. */
+    {
+        blob           he = load("adts_he_48k_stereo.aac");
+        blob           lc = load("adts_lc_44k_stereo.aac");
+        unsigned int   size = he.size + lc.size;
+        unsigned char* data = (unsigned char*)malloc(size);
+
+        memcpy(data, he.data, he.size);
+        memcpy(data + he.size, lc.data, lc.size);
+        fake_file_init(&file, data, size);
+        res = open_file(&file, 0);
+        CHECK(res == FMOD_OK, "HE then LC ADTS: open %d", res);
+        if (res == FMOD_OK) {
+            unsigned int declared = file.state.waveformat->lengthpcm;
+            decoded      out;
+            FMOD_RESULT  readRes = read_all(&file, 4096, &out);
+
+            CHECK(declared == AMPAAC_UNKNOWN || (readRes == FMOD_OK && declared == out.frames),
+                  "HE then LC ADTS: declared %u, decoded %u frames (want unknown, or the decoded count)", declared,
+                  out.frames);
+            free(out.pcm);
+            close_file(&file);
+        }
+        free(data);
+        free(he.data);
+        free(lc.data);
+    }
+
     CHECK(fake_live_allocations() == 0, "audit round 3: %ld allocations leaked", fake_live_allocations());
 }
 

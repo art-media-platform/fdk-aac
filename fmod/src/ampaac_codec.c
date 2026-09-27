@@ -587,6 +587,9 @@ static FMOD_RESULT F_CALL codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode
             /* Past the AAC evidence a transport fault passes through as it is; the rewind below would erase it. */
             return fail_open(state, aac->reader.fault);
         }
+        if (aac->lengthExact) {
+            aac->endPcm = aac->lengthPcm + aac->leadPcm;   /* the walk reached the end: an early end pads to it */
+        }
     }
     res = rewind_container(aac);
     if (res != FMOD_OK) {
