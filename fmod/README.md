@@ -153,13 +153,17 @@ Windows DLL), exports, stack protection, embedded paths, and a revision stamp eq
 
 ## Testing
 
-- `make test` — host tests on macOS (both slices when Rosetta is present; `SAN=1` adds ASan + UBSan):
-  per fixture the rate, channels, tone, length, seeks and trickled reads; gapless alignment against chirp
-  fixtures; unknown size, truncation and corruption; peak stack depth.
+- `make test` — host tests on macOS (both slices when Rosetta is present; `SAN=1` adds ASan + UBSan, and
+  traps unsigned wraps in ampaac's C): per fixture the rate, channels, tone, length, seeks and trickled
+  reads; gapless alignment against chirp fixtures; unknown size, truncation and corruption; read faults and
+  their retry; damage and the stream-ending limits; rate changes; far seeks; peak stack depth. A watchdog
+  fails a run that passes 600 s.
 - `make linux-test` — the host tests on x86_64 Linux, then FMOD's own Linux library playing every fixture
   as an HTTP netstream (`test/serve_range.py`), with seeks and a WAV control, in an amd64 container.
-- `make fuzz` (`test/fuzz.sh`, `FUZZ_SECONDS`) — libFuzzer + ASan + UBSan in a Linux container. Inputs are
-  capped at 256 KiB (`-max_len`), so larger-file paths need their own tests.
+- `make fuzz` (`test/fuzz.sh`, `FUZZ_SECONDS`) — libFuzzer + ASan + UBSan in a Linux container, seeded with
+  the fixtures and two longer streams. Inputs grow up to 512 KiB at once (`-max_len`, `-len_control=0`), and
+  the fuzz build lowers the ADTS resync limit to 32 KiB so they reach it; four leading control bytes steer
+  the source (size, trickle, faults once or for good), the seeks and the limits.
 - `test/fmod_harness.c` — drives a real FMOD library with the codec registered: open, play, seek, length,
   pause, and a System release during an open or a seek; its header lists the settings.
 - `test/make_fixtures.py` — regenerates `test/fixtures/` (macOS `afconvert`).
