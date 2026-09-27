@@ -17,6 +17,8 @@ typedef struct fake_file {
     unsigned int               maxChunk;     /* cap per FILE_READ call (0 = none), like a trickling source */
     FMOD_RESULT                failAtPos;    /* error returned once pos reaches failPos (FMOD_OK = never) */
     unsigned int               failPos;
+    unsigned int               failTimes;    /* failures before reads succeed again (0 = every read) */
+    unsigned int               failed;
     unsigned int               seeks;
     unsigned int               reads;
     int                        sampleRateTags;

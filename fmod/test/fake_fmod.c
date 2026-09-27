@@ -69,7 +69,9 @@ static FMOD_RESULT F_CALL fake_read(FMOD_CODEC_STATE* state, void* buffer, unsig
 
     file->reads++;
     *bytesread = 0;
-    if (file->failAtPos != FMOD_OK && file->pos >= file->failPos) {
+    if (file->failAtPos != FMOD_OK && file->pos >= file->failPos
+        && (file->failTimes == 0 || file->failed < file->failTimes)) {
+        file->failed++;
         return file->failAtPos;
     }
     if (file->maxChunk && want > file->maxChunk) {

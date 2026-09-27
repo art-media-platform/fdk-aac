@@ -862,6 +862,57 @@ static void test_channels(void) {
     CHECK(fake_live_allocations() == 0, "channels: %ld allocations leaked", fake_live_allocations());
 }
 
+/* One failed read (a transient 503) is retried at once: the decode matches a clean one. A timeout is not
+   retried: its error stands. */
+static void test_retry(void) {
+    static const char* names[] = { "adts_lc_44k_stereo.aac", "m4a_lc_44k_stereo.m4a" };
+    fake_file          file;
+    FMOD_RESULT        res;
+    unsigned int       i;
+
+    printf("retry\n");
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        blob    src = load(names[i]);
+        decoded clean;
+        decoded faulted;
+
+        res = decode_blob(src.data, src.size, 4096, &clean);
+        CHECK(res == FMOD_OK, "%s: clean decode %d", names[i], res);
+
+        fake_file_init(&file, src.data, src.size);
+        file.failAtPos = FMOD_ERR_HTTP_SERVER_ERROR;
+        file.failPos   = src.size / 2;
+        file.failTimes = 1;
+        res = open_file(&file, 0);
+        CHECK(res == FMOD_OK, "%s: transient fault open %d", names[i], res);
+        if (res == FMOD_OK) {
+            res = read_all(&file, 4096, &faulted);
+            CHECK(res == FMOD_OK && file.failed == 1 && faulted.frames == clean.frames
+                      && memcmp(faulted.pcm, clean.pcm, (size_t)clean.frames * clean.channels * sizeof(short)) == 0,
+                  "%s: after one 503, %d with %u frames (clean %u), %u failures", names[i], res, faulted.frames,
+                  clean.frames, file.failed);
+            free(faulted.pcm);
+            close_file(&file);
+        }
+
+        fake_file_init(&file, src.data, src.size);
+        file.failAtPos = FMOD_ERR_NET_SOCKET_ERROR;
+        file.failPos   = src.size / 2;
+        file.failTimes = 1;
+        res = open_file(&file, 0);
+        if (res == FMOD_OK) {
+            res = read_all(&file, 4096, &faulted);
+            CHECK(res == FMOD_ERR_NET_SOCKET_ERROR, "%s: a timeout retried: %d, want FMOD_ERR_NET_SOCKET_ERROR", names[i], res);
+            free(faulted.pcm);
+            close_file(&file);
+        }
+        free(clean.pcm);
+        free(src.data);
+    }
+
+    CHECK(fake_live_allocations() == 0, "retry: %ld allocations leaked", fake_live_allocations());
+}
+
 int main(int argc, char** argv) {
     unsigned int i;
 
@@ -879,6 +930,7 @@ int main(int argc, char** argv) {
     test_rejects();
     test_channels();
     test_long_adts();
+    test_retry();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

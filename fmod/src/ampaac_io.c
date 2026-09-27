@@ -25,9 +25,15 @@ void ampaac_reader_init(ampaac_reader* rd, FMOD_CODEC_STATE* codec) {
     rd->size = size;
 }
 
-static void source_read(ampaac_reader* rd, unsigned char* into, unsigned int want, unsigned int* got) {
+/* A failed read is retried once, from the same offset (on a netstream, a new request; FMOD's MP3 codec
+   re-sends a failed one too), except after a timeout: FMOD_ERR_NET_SOCKET_ERROR would only repeat it. */
+static void source_read(ampaac_reader* rd, unsigned int at, unsigned char* into, unsigned int want, unsigned int* got) {
     FMOD_RESULT res = FMOD_CODEC_FILE_READ(rd->codec, into, want, got);
 
+    if (res != FMOD_OK && res != FMOD_ERR_FILE_EOF && res != FMOD_ERR_NET_SOCKET_ERROR && *got == 0
+        && FMOD_CODEC_FILE_SEEK(rd->codec, at, FMOD_CODEC_SEEK_METHOD_SET) == FMOD_OK) {
+        res = FMOD_CODEC_FILE_READ(rd->codec, into, want, got);
+    }
     if (res == FMOD_ERR_FILE_EOF) {
         rd->atEnd = 1;
     } else if (res != FMOD_OK) {
@@ -44,7 +50,7 @@ static void read_through_gap(ampaac_reader* rd) {
     while (end < rd->pos && !rd->atEnd && rd->fault == FMOD_OK) {
         unsigned int gap = rd->pos - end;
         unsigned int got = 0;
-        source_read(rd, rd->buf, gap < AMPAAC_READ_BUF ? gap : AMPAAC_READ_BUF, &got);
+        source_read(rd, end, rd->buf, gap < AMPAAC_READ_BUF ? gap : AMPAAC_READ_BUF, &got);
         end += got;
     }
     rd->bufStart = end < rd->pos ? end : rd->pos;
@@ -65,7 +71,7 @@ static void reader_fill(ampaac_reader* rd, unsigned int need) {
             return;
         }
         want = (need - have + AMPAAC_READ_GRANULE - 1) / AMPAAC_READ_GRANULE * AMPAAC_READ_GRANULE;
-        source_read(rd, rd->buf + rd->bufLen, want < room ? want : room, &got);
+        source_read(rd, rd->bufStart + rd->bufLen, rd->buf + rd->bufLen, want < room ? want : room, &got);
         rd->bufLen += got;
     }
 }
