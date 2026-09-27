@@ -337,8 +337,10 @@ static FMOD_RESULT decode_next(FMOD_CODEC_STATE* state, ampaac_codec* aac) {
                 /* Concealment at another rate (implicit SBR falls back to the core rate for a lost frame):
                    a frame of silence at the stream's rate keeps FMOD's timeline and the seek arithmetic. */
                 silence = 1;
-            } else if (!aac->started && aac->startupDrops < AMPAAC_STARTUP_DROP) {
-                /* Start-up transient of a decoder started clean (SBR not running yet): the rate stands. */
+            } else if (!aac->started && aac->startupDrops < AMPAAC_STARTUP_DROP
+                       && !(info->sampleRate == aac->openRate && info->frameSize == aac->openFrameSize)) {
+                /* Start-up transient of a decoder started clean (SBR not running yet): the rate stands. A
+                   frame in the stream's opening format is none: a restart at the first frame returns to it. */
                 aac->startupDrops++;
                 if (aac->exhausted) {
                     aac->drainLeft = 0;
@@ -551,9 +553,11 @@ static FMOD_RESULT F_CALL codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode
     if (res != FMOD_OK) {
         return fail_open(state, res);
     }
-    aac->sampleRate = format.sampleRate;
-    aac->frameSize  = format.frameSize;
-    aac->channels   = pinned_channels(format.channels);
+    aac->sampleRate    = format.sampleRate;
+    aac->frameSize     = format.frameSize;
+    aac->openRate      = format.sampleRate;
+    aac->openFrameSize = format.frameSize;
+    aac->channels      = pinned_channels(format.channels);
     res = pin_channels(aac);
     if (res != FMOD_OK) {
         return fail_open(state, res);

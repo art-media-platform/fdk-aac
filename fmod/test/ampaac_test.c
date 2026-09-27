@@ -1068,6 +1068,70 @@ static void test_limits(void) {
     CHECK(fake_live_allocations() == 0, "limits: %ld allocations leaked", fake_live_allocations());
 }
 
+/* A seek to the start after a mid-stream rate change plays the start as the first decode did: no frame of
+   the opening format is dropped as a start-up transient. */
+static void test_rate_restart(void) {
+    static const struct { const char* first; const char* second; } cases[] = {
+        { "adts_lc_44k_stereo.aac", "adts_lc_22k_mono.aac" },
+        { "adts_he_48k_stereo.aac", "adts_lc_44k_stereo.aac" },
+    };
+    unsigned int i;
+
+    printf("rate restart\n");
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        blob           a = load(cases[i].first);
+        blob           b = load(cases[i].second);
+        unsigned int   size = a.size + b.size;
+        unsigned char* data = (unsigned char*)malloc(size);
+        decoded        whole;
+        fake_file      file;
+        FMOD_RESULT    res;
+        int            pass;
+
+        memcpy(data, a.data, a.size);
+        memcpy(data + a.size, b.data, b.size);
+        res = decode_blob(data, size, 4096, &whole);
+        CHECK(res == FMOD_OK && whole.rateTags >= 1, "%s + %s: %d, %d rate tags", cases[i].first, cases[i].second, res,
+              whole.rateTags);
+        /* pass 0: seek back while playing past the change; pass 1: after the end of the stream */
+        for (pass = 0; pass < 2 && res == FMOD_OK; pass++) {
+            short*       pcm = (short*)malloc(8192 * 2 * sizeof(short));
+            unsigned int got;
+
+            fake_file_init(&file, data, size);
+            if (open_file(&file, 0) != FMOD_OK) {
+                free(pcm);
+                break;
+            }
+            if (pass == 0) {
+                short*       skip = (short*)malloc((size_t)whole.frames * 2 * sizeof(short));
+                unsigned int past = read_frames(&file, skip, whole.frames - 4096);
+                (void)past;
+                free(skip);
+            } else {
+                decoded rest;
+                read_all(&file, 4096, &rest);
+                free(rest.pcm);
+            }
+            res = codec()->setposition(&file.state, 0, 0, FMOD_TIMEUNIT_PCM);
+            got = read_frames(&file, pcm, 8192);
+            CHECK(res == FMOD_OK && got == 8192 && max_diff(pcm, whole.pcm, (size_t)got * 2) == 0,
+                  "%s + %s: seek to 0 %s: %d, %u frames, max |diff| %.0f against the first decode", cases[i].first,
+                  cases[i].second, pass ? "after the end" : "while playing", res, got,
+                  got ? max_diff(pcm, whole.pcm, (size_t)got * 2) : -1.0);
+            close_file(&file);
+            free(pcm);
+        }
+        if (whole.pcm) {
+            free(whole.pcm);
+        }
+        free(data);
+        free(a.data);
+        free(b.data);
+    }
+    CHECK(fake_live_allocations() == 0, "rate restart: %ld allocations leaked", fake_live_allocations());
+}
+
 /* ADTS seeks: a target within 256 KiB of the last known frame is walked to and lands exactly; a farther one
    is estimated at once, without reading the bytes between (a netstream would wait on each). */
 static void test_far_seek(void) {
@@ -1141,6 +1205,7 @@ int main(int argc, char** argv) {
     test_long_adts();
     test_retry();
     test_limits();
+    test_rate_restart();
     test_far_seek();
 
     printf("%d checks, %d failures\n", checks, failures);

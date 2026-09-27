@@ -111,6 +111,8 @@ typedef struct ampaac_codec {
     int                   channels;
     int                   sampleRate;
     int                   frameSize;     /* PCM frames per decoded access unit */
+    int                   openRate;      /* the rate and frame size at the first access unit */
+    int                   openFrameSize;
 
     /* Decode position, in decoder output samples from the first access unit. FMOD positions are these
        minus leadPcm (decoder delay plus the encoder's priming); endPcm cuts the encoder's padding
