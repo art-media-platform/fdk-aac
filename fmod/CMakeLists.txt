@@ -7,7 +7,7 @@
 # Inputs (set by the Makefile, or pass with -D...):
 #   AMPAAC_PLATFORM   OSX | IOS | ANDROID | WINDOWS | LINUX
 #   FMOD_API_INC      directory holding fmod.h and fmod_codec.h (FMOD Engine SDK: api/core/inc)
-#   AMPAAC_SPIKE      ON: trace FMOD callbacks to stderr and honor AMPAAC_LENGTH_SCALE (measurement builds)
+#   AMPAAC_SPIKE      ON: trace FMOD callbacks to stderr (measurement builds)
 #   AMPAAC_TESTS      ON: also build the host test runner (OSX, LINUX)
 #
 # Platform-specific:

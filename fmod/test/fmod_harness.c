@@ -10,6 +10,7 @@
  *
  *   AMPAAC_REGISTER=after|before|none   when to register the codec (default after System::init)
  *   AMPAAC_PRIORITY=<n>                 codec priority (default 0)
+ *   AMPAAC_WAVWRITER=<file.wav>         record the mix with FMOD's realtime WAV writer instead of NOSOUND
  *
  * FMOD's headers come from FMOD_API_INC at build time; FMOD's library is loaded at run time.
  */
@@ -145,6 +146,7 @@ int main(int argc, char** argv) {
     const char*   url;
     const char*   when = getenv("AMPAAC_REGISTER");
     const char*   prio = getenv("AMPAAC_PRIORITY");
+    const char*   wavPath = getenv("AMPAAC_WAVWRITER");
     unsigned int  priority = prio ? (unsigned int)atoi(prio) : 0;
     unsigned int  seekMs = argc > 5 ? (unsigned int)atoi(argv[5]) : 2000;
     describe_fn   describe = NULL;
@@ -184,14 +186,14 @@ int main(int argc, char** argv) {
     }
 
     check(p_FMOD_System_Create(&system, FMOD_RUNTIME_VERSION), "System_Create");
-    check(p_FMOD_System_SetOutput(system, FMOD_OUTPUTTYPE_NOSOUND), "setOutput");
+    check(p_FMOD_System_SetOutput(system, wavPath ? FMOD_OUTPUTTYPE_WAVWRITER : FMOD_OUTPUTTYPE_NOSOUND), "setOutput");
     check(p_FMOD_System_SetSoftwareFormat(system, 48000, FMOD_SPEAKERMODE_DEFAULT, 0), "setSoftwareFormat");
     check(p_FMOD_System_SetNetworkTimeout(system, 10000), "setNetworkTimeout");
     check(p_FMOD_System_SetStreamBufferSize(system, 128 * 1024, FMOD_TIMEUNIT_RAWBYTES), "setStreamBufferSize");
     if (describe && strcmp(when, "before") == 0) {
         register_codec(system, describe, priority);
     }
-    check(p_FMOD_System_Init(system, 63, FMOD_INIT_NORMAL | FMOD_INIT_THREAD_UNSAFE, NULL), "init");
+    check(p_FMOD_System_Init(system, 63, FMOD_INIT_NORMAL | FMOD_INIT_THREAD_UNSAFE, (void*)wavPath), "init");
     if (describe && strcmp(when, "after") == 0) {
         register_codec(system, describe, priority);
     }

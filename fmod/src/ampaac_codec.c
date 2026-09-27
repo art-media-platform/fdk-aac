@@ -4,10 +4,11 @@
  * FMOD opens every sound through its codec list in priority order; open() claims only streams it can
  * decode and answers FMOD_ERR_FORMAT for everything else, leaving no side effects.
  *
- * Length. FMOD 2.03 ends a stream at the lengthpcm declared at open: it pads silence when the data ends
- * sooner and cuts the tail when it ends later, and it never re-reads the length or calls getlength. So a
- * stream declares its length only when the length is exact; otherwise it declares it unknown, FMOD ends at
- * the decoder's EOF, and the running estimate travels as AMPAAC_LENGTH_TAG for the player's duration.
+ * Length. FMOD 2.03 ends a stream at the lengthpcm declared at open: it plays on to that length when the
+ * data ends sooner and cuts the tail when it ends later, and it never re-reads the length or calls
+ * getlength. So a stream declares its length only when the length is exact; otherwise it declares it
+ * unknown, FMOD ends at the decoder's EOF, and the running estimate travels as AMPAAC_LENGTH_TAG for the
+ * player's duration.
  */
 #include <string.h>
 #include <stdlib.h>

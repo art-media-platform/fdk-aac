@@ -24,10 +24,11 @@ modified (see [Changes to the FDK AAC Codec](#changes-to-the-fdk-aac-codec)).
 
 ## Behavior in FMOD
 
-FMOD 2.03 ends a stream at the length its codec declares at open. It pads silence when the data ends
-sooner, cuts the tail when the data runs longer, and never asks for the length again. So:
+FMOD 2.03 ends a stream at the length its codec declares at open: it plays on to that length when the
+codec's data ends sooner, cuts the tail when the data runs longer, and never asks for the length again. So:
 
-- **Length:** M4A declares its exact length. ADTS declares an unknown length, so FMOD ends the stream at
+- **Length:** M4A declares its exact length (for a truncated file, the length of the access units it
+  holds). ADTS declares an unknown length, so FMOD ends the stream at
   the decoder's end of stream. The running estimate is published as the tag `AMPAAC_LENGTH_MS`
   (`FMOD_TAGTYPE_USER`, 32-bit integer) and becomes exact at the end. With `FMOD_ACCURATETIME`, ADTS
   reads the whole stream at open and declares its exact length.
@@ -38,6 +39,9 @@ sooner, cuts the tail when the data runs longer, and never asks for the length a
 - **Sample-rate changes** (implicit SBR found after open) arrive as FMOD's `Sample Rate Change` FLOAT tag.
 - **Netstreams:** every FMOD netstream seek is a new HTTP request, so forward jumps of up to 256 KiB are
   read through instead of seeked.
+- **A body cut short:** when an HTTP body ends before its Content-Length, FMOD's net layer fills the rest
+  with zeros and reports success, so the codec cannot see the cut. An M4A then fades out through the
+  decoder's concealment and stays near silence (about −76 dBFS) to its declared end; ADTS ends at the cut.
 - **Errors:** open returns `FMOD_ERR_FORMAT` only for data that is not AAC; file and network errors pass
   through unchanged.
 - **Memory:** the codec's state and tables come from FMOD's allocator; fdk's decoder calls `calloc`.

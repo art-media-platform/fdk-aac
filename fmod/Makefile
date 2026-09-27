@@ -16,7 +16,7 @@
 # Overrides:
 #   BUILD_TYPE=Release|Debug   BUILD_ROOT=<dir>   UNITY_LIBS=<dir>   CMAKE=<cmake>   GENERATOR=<gen>
 #   LLVM_MINGW_ROOT=<llvm-mingw>   ZIG=<zig>   FMOD_LINUX_LIB=<libfmodstudio.so>   VERBOSE=1
-#   SPIKE=1 (callback traces, AMPAAC_LENGTH_SCALE)
+#   SPIKE=1 (callback traces to stderr)
 #
 # A build never writes into the Unity tree. `make install` does, temp + rename, so an editor holding the
 # old library keeps its mapped inode; Unity loads a new native plugin only after an editor restart.
