@@ -22,7 +22,7 @@
 #define AMPAAC_RESYNC_LIMIT  1048576u  /* ADTS: bytes one resync scans before the stream counts as ended */
 #define AMPAAC_BOX_LIMIT     4096u     /* MP4: top-level boxes walked looking for moov */
 #define AMPAAC_STARTUP_DROP  8u        /* frames at another rate a restarted decoder may drop (SBR start-up) */
-#define AMPAAC_CONCEAL_LIMIT_MS 10000u /* consecutive concealed output that ends the stream */
+#define AMPAAC_CONCEAL_LIMIT_MS 10000u /* ADTS of unknown size: consecutive concealed output that ends it */
 #define AMPAAC_LENGTH_TAG    "AMPAAC_LENGTH_MS"   /* FMOD_TAGTYPE_USER, INT: length estimate for a stream
                                                      FMOD reports as unknown length */
 #define AMPAAC_UNKNOWN       0xFFFFFFFFu
@@ -131,6 +131,7 @@ typedef struct ampaac_codec {
     int                   started;       /* a frame has been handed out since the decoder last started clean */
     unsigned int          startupDrops;  /* frames at another rate dropped since then */
     unsigned int          concealRun;    /* consecutive concealed frames */
+    int                   gaveUp;        /* a limit ended the stream, not its data: the length stays an estimate */
     int                   exact;         /* decodedPcm is exact (continuous decode from an exact anchor) */
 
     /* PCM carry: one decoded access unit handed out across read calls. */
@@ -170,7 +171,8 @@ FMOD_RESULT ampaac_mp4_next(ampaac_codec* aac, unsigned int* auLen);
 FMOD_RESULT ampaac_mp4_seek(ampaac_codec* aac, unsigned int targetPcm);
 void        ampaac_mp4_close(ampaac_codec* aac);
 
-/* Seek walk budget; tests lower it to exercise the estimate path. */
+/* Seek walk budget and concealment limit; tests lower them. */
 extern unsigned int ampaac_hop_budget_ms;
+extern unsigned int ampaac_conceal_limit_ms;
 
 #endif

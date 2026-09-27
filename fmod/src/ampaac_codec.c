@@ -150,9 +150,16 @@ static void adapt_channels(INT_PCM* pcm, unsigned int frames, int from, int to) 
     }
 }
 
-/* Frames of consecutive concealment that end the stream. */
+unsigned int ampaac_conceal_limit_ms = AMPAAC_CONCEAL_LIMIT_MS;
+
+/* Frames of consecutive concealment that end an ADTS stream of unknown size (a live source that has lost
+   its signal). A stream with a size or an access-unit table conceals through damage and decodes what
+   follows: its data bounds it. */
 static unsigned int conceal_limit(const ampaac_codec* aac) {
-    return (unsigned int)((unsigned long long)AMPAAC_CONCEAL_LIMIT_MS * (unsigned int)aac->sampleRate / 1000u
+    if (aac->container != AMPAAC_ADTS || aac->reader.size != AMPAAC_UNKNOWN) {
+        return AMPAAC_UNKNOWN;
+    }
+    return (unsigned int)((unsigned long long)ampaac_conceal_limit_ms * (unsigned int)aac->sampleRate / 1000u
                           / (unsigned int)aac->frameSize);
 }
 
@@ -205,9 +212,13 @@ static FMOD_RESULT feed_next_au(ampaac_codec* aac) {
 }
 
 /* At the end of the stream the decoded total is the length: exact when decoding ran continuously from an
-   exact anchor, else the final estimate. */
+   exact anchor, else the final estimate. A stream a limit ended keeps its estimate. */
 static void finish_length(FMOD_CODEC_STATE* state, ampaac_codec* aac) {
     if (aac->lengthExact || aac->lengthFinal) {
+        return;
+    }
+    if (aac->gaveUp) {
+        publish_length(state, aac);
         return;
     }
     aac->lengthPcm   = aac->decodedPcm > aac->leadPcm ? aac->decodedPcm - aac->leadPcm : 0;
@@ -310,6 +321,7 @@ static FMOD_RESULT decode_next(FMOD_CODEC_STATE* state, ampaac_codec* aac) {
                 WARN(state, "decoder error 0x%x; ending the stream", (unsigned int)err);
                 aac->exhausted = 1;
                 aac->drainLeft = 0;
+                aac->gaveUp    = 1;
                 continue;
             }
             /* Transport or bitstream loss: one concealed frame keeps time, then fresh input. */
@@ -348,6 +360,7 @@ static FMOD_RESULT decode_next(FMOD_CODEC_STATE* state, ampaac_codec* aac) {
             WARN(state, "%u frames concealed in a row; ending the stream", aac->concealRun);
             aac->exhausted = 1;
             aac->drainLeft = 0;
+            aac->gaveUp    = 1;
             continue;
         }
         aac->started = 1;
@@ -652,6 +665,7 @@ static FMOD_RESULT F_CALL codec_setposition(FMOD_CODEC_STATE* state, int subsoun
     if (unit != FMOD_TIMEUNIT_PCM) {
         return FMOD_ERR_FORMAT;
     }
+    aac->gaveUp = 0;   /* a limit that ended the stream applied to the data it met, not to the target's */
     if (aac->lengthExact && position > aac->lengthPcm) {
         position = aac->lengthPcm;
     }

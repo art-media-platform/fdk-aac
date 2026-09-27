@@ -862,6 +862,48 @@ static void test_channels(void) {
     CHECK(fake_live_allocations() == 0, "channels: %ld allocations leaked", fake_live_allocations());
 }
 
+static unsigned char* repeat_blob(const blob* src, unsigned int copies, unsigned int* size) {
+    unsigned char* data = (unsigned char*)malloc((size_t)src->size * copies);
+    unsigned int   n;
+
+    for (n = 0; n < copies; n++) {
+        memcpy(data + (size_t)n * src->size, src->data, src->size);
+    }
+    *size = src->size * copies;
+    return data;
+}
+
+/* Zeroes the payload of ADTS frames [first, last), headers kept: the decoder conceals them. */
+static void zero_adts_payloads(unsigned char* data, unsigned int size, unsigned int first, unsigned int last) {
+    unsigned int       at = 0;
+    unsigned int       frame = 0;
+    ampaac_adts_header hdr;
+
+    while (at + 7 <= size && ampaac_adts_parse(data + at, size - at, &hdr) && at + hdr.frameLength <= size) {
+        if (frame >= first && frame < last) {
+            memset(data + at + hdr.headerLength, 0, hdr.frameLength - hdr.headerLength);
+        }
+        at += hdr.frameLength;
+        frame++;
+    }
+}
+
+/* Reads `frames` frames at the current position into pcm (channels interleaved); returns the count read. */
+static unsigned int read_frames(fake_file* file, short* pcm, unsigned int frames) {
+    unsigned int total = 0;
+    int          channels = file->state.waveformat->channels;
+
+    while (total < frames) {
+        unsigned int got = 0;
+        FMOD_RESULT  res = codec()->read(&file->state, pcm + (size_t)total * channels, frames - total, &got);
+        total += got;
+        if (res != FMOD_OK || got == 0) {
+            break;
+        }
+    }
+    return total;
+}
+
 /* One failed read (a transient 503) is retried at once: the decode matches a clean one. A timeout is not
    retried: its error stands. */
 static void test_retry(void) {
@@ -913,6 +955,108 @@ static void test_retry(void) {
     CHECK(fake_live_allocations() == 0, "retry: %ld allocations leaked", fake_live_allocations());
 }
 
+/* Damage a stream conceals through, and the limits that end one without taking the end for its length. */
+static void test_limits(void) {
+    fake_file   file;
+    FMOD_RESULT res;
+
+    printf("limits\n");
+    /* 12 s of damaged frames (past the 10 s concealment limit) in a 60 s ADTS stream: with a size, the stream
+       conceals through and decodes what follows; without one (a live source), the limit ends it, and that
+       end is not taken for the stream's real length: a later seek past it still plays. */
+    {
+        blob           src = load("adts_lc_44k_stereo.aac");
+        unsigned int   size;
+        unsigned char* data = repeat_blob(&src, 20, &size);   /* 132 frames (3 s) per copy */
+        decoded        clean;
+        decoded        damaged;
+
+        res = decode_blob(data, size, 4096, &clean);
+        zero_adts_payloads(data, size, 264, 264 + 517);       /* 6-18 s */
+
+        res = decode_blob(data, size, 4096, &damaged);
+        CHECK(res == FMOD_OK && damaged.frames + 8 * 1024 >= clean.frames && damaged.frames <= clean.frames + 8 * 1024,
+              "damaged ADTS with a size: %d, %u frames (clean %u)", res, damaged.frames, clean.frames);
+        if (res == FMOD_OK && damaged.frames > 25 * 44100) {
+            double level = channel_rms(&damaged, 0, 21 * 44100, 44100);
+            CHECK(level > 1000, "damaged ADTS with a size: rms %.1f at 21 s, want the stream decoded past the damage", level);
+        }
+        if (res == FMOD_OK) {
+            free(damaged.pcm);
+        }
+
+        fake_file_init(&file, data, size);
+        file.sizeUnknown = 1;
+        res = open_file(&file, 0);
+        CHECK(res == FMOD_OK, "damaged ADTS without a size: open %d", res);
+        if (res == FMOD_OK) {
+            short        pcm[4096 * 2];
+            unsigned int got;
+            decoded      one;
+
+            res = read_all(&file, 4096, &damaged);
+            CHECK(res == FMOD_OK && damaged.frames < 18 * 44100 && damaged.frames > 15 * 44100,
+                  "damaged ADTS without a size: %d, %u frames, want an end ~10 s into the damage at 6 s", res,
+                  damaged.frames);
+            free(damaged.pcm);
+            res = codec()->setposition(&file.state, 0, 40 * 44100, FMOD_TIMEUNIT_PCM);
+            got = read_frames(&file, pcm, 4096);
+            memset(&one, 0, sizeof(one));
+            one.pcm      = pcm;
+            one.channels = 2;
+            one.frames   = got;
+            CHECK(res == FMOD_OK && got == 4096 && channel_rms(&one, 0, 0, got) > 1000,
+                  "seek to 40 s after the limit ended the stream: %d, %u frames, rms %.1f", res, got,
+                  got ? channel_rms(&one, 0, 0, got) : 0.0);
+            close_file(&file);
+        }
+        free(clean.pcm);
+        free(data);
+        free(src.data);
+    }
+
+    /* An M4A conceals through damaged access units and decodes what follows (its table bounds it; the limit
+       does not apply), to its exact length. */
+    {
+        blob           src = load("m4a_lc_44k_stereo.m4a");
+        unsigned char* data = (unsigned char*)malloc(src.size);
+        decoded        clean;
+        decoded        damaged;
+
+        memcpy(data, src.data, src.size);
+        res = decode_blob(src.data, src.size, 4096, &clean);
+        fake_file_init(&file, src.data, src.size);
+        if (res == FMOD_OK && open_file(&file, 0) == FMOD_OK) {
+            ampaac_codec* aac = (ampaac_codec*)file.state.plugindata;
+            unsigned int  au;
+
+            for (au = 43; au < 86 && au < aac->mp4.samples; au++) {   /* 1-2 s */
+                unsigned int len = aac->mp4.sizes ? ((unsigned int)aac->mp4.sizes[au * 4] << 24 | (unsigned int)aac->mp4.sizes[au * 4 + 1] << 16
+                                                     | (unsigned int)aac->mp4.sizes[au * 4 + 2] << 8 | aac->mp4.sizes[au * 4 + 3])
+                                                  : aac->mp4.uniform;
+                memset(data + aac->mp4.offsets[au], 0, len);
+            }
+            close_file(&file);
+            ampaac_conceal_limit_ms = 200;
+            res = decode_blob(data, src.size, 4096, &damaged);
+            ampaac_conceal_limit_ms = AMPAAC_CONCEAL_LIMIT_MS;
+            CHECK(res == FMOD_OK && damaged.frames == clean.frames, "damaged M4A: %d, %u frames (clean %u)", res,
+                  damaged.frames, clean.frames);
+            if (res == FMOD_OK && damaged.frames > (unsigned int)(2.6 * 44100)) {
+                double level = channel_rms(&damaged, 0, (unsigned int)(2.2 * 44100), 44100 / 4);
+                CHECK(level > 1000, "damaged M4A: rms %.1f at 2.2 s, want the stream decoded past the damage", level);
+            }
+            if (res == FMOD_OK) {
+                free(damaged.pcm);
+            }
+            free(clean.pcm);
+        }
+        free(data);
+        free(src.data);
+    }
+    CHECK(fake_live_allocations() == 0, "limits: %ld allocations leaked", fake_live_allocations());
+}
+
 int main(int argc, char** argv) {
     unsigned int i;
 
@@ -931,6 +1075,7 @@ int main(int argc, char** argv) {
     test_channels();
     test_long_adts();
     test_retry();
+    test_limits();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -135,8 +135,8 @@ void ampaac_adts_reset_index(ampaac_codec* aac) {
 
 /* Scans forward for a chained sync and moves the reader onto it. `from` is 1 when the frame at the read
    position already failed, 0 when the read position itself may start a chain (a seek landing). Past
-   AMPAAC_RESYNC_LIMIT bytes without a chain the stream counts as ended: one read call must not scan an
-   unbounded transfer. */
+   AMPAAC_RESYNC_LIMIT bytes without a chain the stream counts as ended, and the codec as having given up:
+   one read call must not scan an unbounded transfer. */
 static FMOD_RESULT resync(ampaac_codec* aac, unsigned int from) {
     ampaac_reader* rd = &aac->reader;
     unsigned int   scanned = 0;
@@ -164,6 +164,7 @@ static FMOD_RESULT resync(ampaac_codec* aac, unsigned int from) {
         ampaac_reader_skip(rd, avail / 2);
         scanned += avail / 2;
         if (scanned >= AMPAAC_RESYNC_LIMIT) {
+            aac->gaveUp = 1;
             return FMOD_ERR_FILE_EOF;
         }
     }
@@ -249,13 +250,13 @@ FMOD_RESULT ampaac_adts_next(ampaac_codec* aac, unsigned int* auLen) {
         }
 
         /* Lost sync: bytes are skipped, so positions past this point are estimates, unless no frame
-           follows: then the bytes were a trailer (ID3v1, APE, Lyrics3), not lost audio. */
+           follows before the data ends: then the bytes were a trailer (ID3v1, APE, Lyrics3), not lost audio. */
         {
             int wasExact = aac->exact;
 
             aac->exact = 0;
             res = resync(aac, 1);
-            if (res == FMOD_ERR_FILE_EOF) {
+            if (res == FMOD_ERR_FILE_EOF && !aac->gaveUp) {
                 aac->exact = wasExact;
             }
             if (res != FMOD_OK) {

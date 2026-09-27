@@ -70,9 +70,11 @@ codec's data ends sooner, cuts the tail when the data runs longer, and never ask
   probe is unmeasured. After that, a failed read is retried once at once from the same offset (on a
   netstream, a new request, as FMOD's MP3 codec does), except after a timeout
   (`FMOD_ERR_NET_SOCKET_ERROR`), which a retry would only repeat; a second failure passes through unchanged.
-- **Limits:** a stream ends, as a normal end of file, after 10 s of unbroken concealment (a stream yielding
-  nothing else that long is not recovering; logged in FMOD's debug log) or when a resync finds no frame in
-  1 MiB (over a hundred maximum-size ADTS frames; not logged).
+- **Damage and limits:** a stream with a size or an access-unit table conceals damaged frames and decodes
+  what follows. An ADTS stream of unknown size (a live source) ends after 10 s of unbroken concealment
+  (logged in FMOD's debug log); any stream ends after 16 decoder failures in a row, and ADTS when a resync
+  finds no frame in 1 MiB (over a hundred maximum-size frames; not logged). These ends read as a normal end
+  of file, leave the length an estimate, and a later seek past them plays.
 - **Memory:** the codec's state and tables come from FMOD's allocator; fdk's decoder calls `calloc`.
 - **Stack:** a decode peaks near 50 KB of stack (`make test` measures it: 49,736 bytes on arm64, 49,800 on
   x86_64; fdk's frame decoder alone takes 35.9 KB). FMOD's default STREAM (96 KiB) and NONBLOCKING
