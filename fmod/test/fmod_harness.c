@@ -7,11 +7,15 @@
  *     seek       play 1 s, Channel::setPosition(seek-ms), play to the end
  *     getlength  open, Sound::getLength five times, play 1 s, again
  *     open       open to READY (or ERROR) and report the time taken
+ *     teardown   release the System while the open waits for body bytes (the server holds the body), then
+ *                stay alive for seek-ms more (default 2000) while the open resolves; AMPAAC_ABANDON=1 first
+ *                drops the network timeout to 50 ms and waits for the open to settle
  *
  *   AMPAAC_REGISTER=after|before|none   when to register the codec (default after System::init)
  *   AMPAAC_PRIORITY=<n>                 codec priority (default 0)
  *   AMPAAC_WAVWRITER=<file.wav>         record the mix with FMOD's realtime WAV writer instead of NOSOUND
  *   AMPAAC_STREAM_BUFFER=<bytes>        stream file buffer (default 131072, as the AMP client; 0 = FMOD's default)
+ *   AMPAAC_PLAY_TIMEOUT=<seconds>       give up on a channel that has not stopped (default 600)
  *
  * FMOD's headers come from FMOD_API_INC at build time; FMOD's library is loaded at run time.
  */
@@ -87,8 +91,12 @@ static double wait_ready(FMOD_SYSTEM* system, FMOD_SOUND* sound, FMOD_OPENSTATE*
         unsigned int percent;
         FMOD_BOOL    starving;
         FMOD_BOOL    diskbusy;
+        FMOD_RESULT  res;
         p_FMOD_System_Update(system);
-        p_FMOD_Sound_GetOpenState(sound, state, &percent, &starving, &diskbusy);
+        res = p_FMOD_Sound_GetOpenState(sound, state, &percent, &starving, &diskbusy);
+        if (*state == FMOD_OPENSTATE_ERROR) {
+            printf("open_result=%d\n", res);   /* why a non-blocking open failed */
+        }
         if (*state == FMOD_OPENSTATE_READY || *state == FMOD_OPENSTATE_ERROR) {
             return now() - start;
         }
@@ -113,6 +121,8 @@ static void report_length(FMOD_SOUND* sound, const char* when) {
 
 /* Plays until the channel stops (FmodPlayer: READY and the channel stopped = end of track). */
 static void play_to_end(FMOD_SYSTEM* system, FMOD_CHANNEL* channel, double seekAt, unsigned int seekMs) {
+    const char*  limit = getenv("AMPAAC_PLAY_TIMEOUT");
+    double       playTimeout = limit ? atof(limit) : 600;
     double       start = now();
     unsigned int lastPos = 0;
     int          seeked = 0;
@@ -133,8 +143,8 @@ static void play_to_end(FMOD_SYSTEM* system, FMOD_CHANNEL* channel, double seekA
             check(p_FMOD_Channel_SetPosition(channel, seekMs, FMOD_TIMEUNIT_MS), "setPosition");
             printf("seek_at_s=%.3f seek_to_ms=%u\n", now() - start, seekMs);
         }
-        if (now() - start > 600) {
-            printf("error=timeout\n");
+        if (now() - start > playTimeout) {
+            printf("error=timeout (channel still playing after %.0f s)\n", playTimeout);
             break;
         }
         usleep(5000);
@@ -167,7 +177,7 @@ int main(int argc, char** argv) {
     double started;
 
     if (argc < 5) {
-        fprintf(stderr, "usage: fmod_harness <libfmod> <libampaac|-> <play|seek|getlength|open> <url> [seek-ms]\n");
+        fprintf(stderr, "usage: fmod_harness <libfmod> <libampaac|-> <play|seek|getlength|open|teardown> <url> [ms]\n");
         return 2;
     }
     scenario = argv[3];
@@ -209,6 +219,36 @@ int main(int argc, char** argv) {
     exinfo.nonblockthreadid   = 0;
     started = now();
     check(p_FMOD_System_CreateSound(system, url, FMOD_CREATESTREAM | FMOD_NONBLOCKING, &exinfo, &sound), "createStream");
+    if (strcmp(scenario, "teardown") == 0) {
+        double       begin = now();
+        unsigned int percent;
+        FMOD_BOOL    starving;
+        FMOD_BOOL    diskbusy;
+
+        do {
+            p_FMOD_System_Update(system);
+            p_FMOD_Sound_GetOpenState(sound, &state, &percent, &starving, &diskbusy);
+            if (state == FMOD_OPENSTATE_BUFFERING || state == FMOD_OPENSTATE_READY || state == FMOD_OPENSTATE_ERROR) {
+                break;
+            }
+            usleep(1000);
+        } while (now() - begin < 5);
+        printf("teardown_state=%d after %.3f s\n", (int)state, now() - begin);
+        if (getenv("AMPAAC_ABANDON")) {
+            /* The client's workaround: a short network timeout lets the pending open settle first. */
+            p_FMOD_System_SetNetworkTimeout(system, 50);
+            opened = wait_ready(system, sound, &state);
+            printf("abandoned: openstate=%d after %.3f s\n", (int)state, opened);
+        }
+        fflush(stdout);
+        p_FMOD_System_Close(system);
+        p_FMOD_System_Release(system);
+        printf("released at %.3f s\n", now() - begin);
+        fflush(stdout);
+        usleep(seekMs * 1000u);   /* the held body arrives and the open resolves */
+        printf("survived %.3f s after release\n", seekMs / 1000.0);
+        return 0;
+    }
     opened = wait_ready(system, sound, &state);
     printf("open_s=%.4f openstate=%d\n", opened, (int)state);
     if (state != FMOD_OPENSTATE_READY) {

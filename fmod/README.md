@@ -15,8 +15,9 @@ modified (see [Changes to the FDK AAC Codec](#changes-to-the-fdk-aac-codec)).
   goes through the same decoder path; no fixture covers it yet.
 - **Containers:** ADTS (`.aac`), including ID3v2 prefixes and streams that start mid-frame (ICY captures);
   MP4/M4A with `moov` before or after `mdat`. Fragmented MP4 is rejected.
-- **Output:** 16-bit PCM, 1–8 channels in WAV channel order. The channel count is pinned at open, so a
-  mid-stream configuration change cannot change FMOD's format.
+- **Output:** 16-bit PCM in WAV channel order: 1, 2, 6 or 8 channels, the counts fdk's mixer can pin. A 3–5
+  channel stream opens as 5.1 and a 7-channel one as 7.1, with the missing channels silent. The count is
+  pinned at open, so a mid-stream layout change cannot change FMOD's format.
 - **Level:** fdk's loudness normalization is off (`AAC_DRC_REFERENCE_LEVEL` = -1): output keeps the
   encoded level.
 - **Gapless:** M4A trims the encoder's priming and padding (edit list or `iTunSMPB`) and compensates
@@ -39,16 +40,22 @@ codec's data ends sooner, cuts the tail when the data runs longer, and never ask
   are exact wherever the walk reaches and estimated beyond it.
 - **Sample-rate changes** (implicit SBR found after open) arrive as FMOD's `Sample Rate Change` FLOAT tag.
 - **Netstreams:** every FMOD netstream seek is a new HTTP request, so forward jumps of up to 256 KiB are
-  read through instead of seeked.
+  read through instead of seeked. FMOD also reads the last ≤ 2 KiB of every file at open: its open waits
+  on that request (up to the network timeout) unless the server answers it, and a 503 there does no harm.
+  A seek whose request fails or outlives the network timeout leaves the channel stranded: FMOD reports it
+  playing at the target and never ends it, for FMOD's own codecs as for ampaac.
 - **A body cut short:** when an HTTP body ends before its Content-Length, FMOD neither fails nor
   reconnects, and reads keep succeeding up to that length, so the codec cannot see the cut. Once FMOD's
   receive ring (twice the stream buffer size) has wrapped, the missing bytes are its stale contents,
   cycling; before that, zeros or an early end of file. ADTS frames in stale bytes are valid, so the missing
   span replays audio from one ring earlier, as it does with FMOD's own MP3 codec. M4A access units read
   from stale bytes fail to decode, and fdk's concealment holds the output near silence (under −66 dBFS) to
-  the declared end. A server must never cut a body.
-- **Errors:** open returns `FMOD_ERR_FORMAT` only for data that is not AAC; file and network errors pass
-  through unchanged.
+  the declared end. When an M4A's data ends before its declared length, ampaac plays silence to that
+  length, so FMOD never fills it by repeating its last block. A server must never cut a body.
+- **Errors:** open returns `FMOD_ERR_FORMAT` for data that is not AAC, and for a file error before the data
+  shows `ftyp` or an ADTS frame chain, so FMOD's own codecs still get their turn (an MP3's ID3v2 skip is a
+  hard seek). After that, file and network errors pass through unchanged. A stream ends after 10 s of
+  unbroken concealment, or when a resync finds no frame in 1 MiB.
 - **Memory:** the codec's state and tables come from FMOD's allocator; fdk's decoder calls `calloc`.
 - **Stack:** a decode peaks near 50 KB of stack (`make test` measures it: 49,736 bytes on arm64, 49,800 on
   x86_64; fdk's frame decoder alone takes 35.9 KB). FMOD's default STREAM (96 KiB) and NONBLOCKING
