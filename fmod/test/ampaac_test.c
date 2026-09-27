@@ -3,6 +3,7 @@
  * Usage: ampaac_test <fixtures dir>
  */
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -534,6 +535,88 @@ static void test_alignment(void) {
     CHECK(fake_live_allocations() == 0, "alignment: %ld allocations leaked", fake_live_allocations());
 }
 
+/*
+ * Stack depth. fdk-aac keeps its scratch on the stack (libSYS genericStds.h C_ALLOC_SCRATCH_START):
+ * CAacDecoder_DecodeFrame alone is a 35.9 KB frame (clang -O2, arm64), and a full decode peaks near
+ * 50 KB. FMOD runs codec reads on its STREAM thread (96 KiB by default) and opens on NONBLOCKING
+ * (112 KiB), under 2x headroom; the AMP client raises both to 192 KiB (FMOD.Thread.SetAttributes before
+ * the first System). Each fixture's open, rewind, header-walk seek and decode run on a painted stack;
+ * the high-water mark must leave 3x headroom under 192 KiB.
+ */
+#define STACK_SIZE  (256u * 1024u)
+#define STACK_LIMIT (64u * 1024u)
+
+typedef struct stack_job {
+    blob        src;
+    FMOD_RESULT res;
+} stack_job;
+
+static void* stack_job_run(void* arg) {
+    stack_job* job = (stack_job*)arg;
+    fake_file  file;
+    decoded    out;
+
+    fake_file_init(&file, job->src.data, job->src.size);
+    job->res = open_file(&file, 0);
+    if (job->res == FMOD_OK) {
+        codec()->setposition(&file.state, 0, 0, FMOD_TIMEUNIT_PCM);
+        codec()->setposition(&file.state, 0, (unsigned int)file.state.waveformat->frequency, FMOD_TIMEUNIT_PCM);
+        job->res = read_all(&file, 4096, &out);
+        free(out.pcm);
+        close_file(&file);
+    }
+    return NULL;
+}
+
+static unsigned int peak_stack(stack_job* job) {
+    unsigned char* stack = NULL;
+    pthread_attr_t attr;
+    pthread_t      thread;
+    unsigned int   untouched = 0;
+
+    if (posix_memalign((void**)&stack, 16384, STACK_SIZE) != 0) {
+        return STACK_SIZE;
+    }
+    memset(stack, 0xA5, STACK_SIZE);
+    pthread_attr_init(&attr);
+    pthread_attr_setstack(&attr, stack, STACK_SIZE);
+    pthread_create(&thread, &attr, stack_job_run, job);
+    pthread_join(thread, NULL);
+    pthread_attr_destroy(&attr);
+    while (untouched < STACK_SIZE && stack[untouched] == 0xA5) {
+        untouched++;   /* the stack grows down: the painted floor survives */
+    }
+    free(stack);
+    return STACK_SIZE - untouched;
+}
+
+static void test_stack_depth(void) {
+    unsigned int i;
+    unsigned int worst = 0;
+
+    printf("stack depth\n");
+    for (i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i++) {
+        stack_job    job;
+        unsigned int used;
+
+        job.src = load(fixtures[i].name);
+        job.res = FMOD_OK;
+        used    = peak_stack(&job);
+        CHECK(job.res == FMOD_OK, "%s: decode on the painted stack %d", fixtures[i].name, job.res);
+        if (used > worst) {
+            worst = used;
+        }
+        printf("  %-26s %6u bytes\n", fixtures[i].name, used);
+        free(job.src.data);
+    }
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+    worst = 0;   /* ASan frames are several times larger; the budget applies to release builds */
+#endif
+#endif
+    CHECK(worst <= STACK_LIMIT, "peak stack %u bytes, want at most %u (3x headroom under 192 KiB)", worst, STACK_LIMIT);
+}
+
 static void expect_format_error(const char* what, const unsigned char* data, unsigned int size) {
     fake_file   file;
     FMOD_RESULT res;
@@ -601,6 +684,7 @@ int main(int argc, char** argv) {
         test_fixture(&fixtures[i]);
     }
     test_alignment();
+    test_stack_depth();
     test_rejects();
 
     printf("%d checks, %d failures\n", checks, failures);
