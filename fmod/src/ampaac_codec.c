@@ -574,6 +574,8 @@ static FMOD_RESULT F_CALL codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode
         ampaac_adts_reset_index(aac);
         if (usermode & FMOD_ACCURATETIME) {
             ampaac_adts_walk_to_end(aac);   /* reads the whole stream: exact length and a full seek index */
+        } else {
+            ampaac_adts_walk_open(aac);
         }
     }
     res = rewind_container(aac);

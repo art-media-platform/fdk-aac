@@ -31,12 +31,14 @@ FMOD 2.03 ends a stream at the length its codec declares at open: it plays on to
 codec's data ends sooner, cuts the tail when the data runs longer, and never asks for the length again. So:
 
 - **Length:** M4A declares its exact length (for a truncated file, the length of the access units it
-  holds). ADTS declares an unknown length, so FMOD ends the stream at
-  the decoder's end of stream. The running estimate is published as the tag `AMPAAC_LENGTH_MS`
-  (`FMOD_TAGTYPE_USER`, 32-bit integer) and becomes exact at the end. It comes from the mean frame size so
-  far, so early in a VBR stream it can be far off: a 90 s speech file with a quiet opening estimated 126 s
-  at open and 92 s after 60 s of play. With `FMOD_ACCURATETIME`, ADTS reads the whole stream at open and
-  declares its exact length.
+  holds). An ADTS open walks the frame headers of the stream's first 128 KiB (up to 100 ms; the bytes FMOD
+  buffers before READY at a 128 KiB stream buffer). A stream that ends inside them declares its exact
+  length; a longer one declares an unknown length, so FMOD ends it at the decoder's end of stream. Its
+  running estimate is published as the tag `AMPAAC_LENGTH_MS` (`FMOD_TAGTYPE_USER`, 32-bit integer), from
+  the mean frame size of the frames known so far, and becomes exact at the end: a 90 s VBR speech file with
+  a quiet opening estimates 97 s at open (the probe's 8 KB alone gave 126 s). A stream without a size gets
+  no walk and no estimate. With `FMOD_ACCURATETIME`, ADTS reads the whole stream at open and declares its
+  exact length.
 - **Seeking:** M4A seeks are sample-exact: decoding restarts 8 access units ahead of the target (xHE-AAC:
   from the sync sample at or before that point) and drops the pre-roll output. An ADTS seek to within
   256 KiB of the nearest known frame walks frame headers forward, for up to 100 ms, and lands exactly

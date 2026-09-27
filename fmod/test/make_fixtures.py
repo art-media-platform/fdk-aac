@@ -47,6 +47,10 @@ MULTICHANNEL = [
 MULTI_SECONDS = 1.0
 CHIRP_LOW, CHIRP_HIGH = 200.0, 4000.0
 
+# 2 s of digital silence, LC 44.1 kHz stereo like adts_lc_44k_stereo.aac: its frames are 13 bytes, so a stream that
+# opens with it is the VBR case for the ADTS length estimate (a quiet opening).
+SILENCE = ("adts_lc_44k_silence.aac", 128000, 44100, 2, 2.0)
+
 # Derived from m4a_lc_44k_stereo.m4a (afconvert writes moov first and gapless info only as iTunSMPB).
 MOOV_AT_END = "m4a_lc_44k_moovend.m4a"
 ELST_ONLY   = "m4a_lc_44k_elst.m4a"
@@ -192,6 +196,17 @@ def main():
                 write_tone(wav, rate, channels)
             dest = os.path.join(OUT, name)
             subprocess.run(["afconvert", "-f", container, "-d", fmt, "-b", str(bitrate), wav, dest], check=True)
+            print(f"{name}: {os.path.getsize(dest)} bytes")
+        name, bitrate, rate, channels, seconds = SILENCE
+        if build(name):
+            wav = os.path.join(tmp, "silence.wav")
+            with wave.open(wav, "wb") as out:
+                out.setnchannels(channels)
+                out.setsampwidth(2)
+                out.setframerate(rate)
+                out.writeframes(bytes(int(seconds * rate) * channels * 2))
+            dest = os.path.join(OUT, name)
+            subprocess.run(["afconvert", "-f", "adts", "-d", "aac ", "-b", str(bitrate), wav, dest], check=True)
             print(f"{name}: {os.path.getsize(dest)} bytes")
         for name, container, fmt, bitrate, rate in CHIRPS:
             if not build(name):

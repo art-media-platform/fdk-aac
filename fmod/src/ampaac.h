@@ -18,7 +18,9 @@
 #define AMPAAC_OPEN_AUS      3         /* access units decoded at open to learn the output format */
 #define AMPAAC_PREROLL_AUS   8         /* access units decoded and dropped ahead of a seek target (PS needs ~8) */
 #define AMPAAC_READ_THROUGH  262144u   /* forward jumps up to this far are read through, not seeked */
-#define AMPAAC_HOP_BUDGET_MS 100u      /* ADTS: time a seek may spend walking frame headers */
+#define AMPAAC_HOP_BUDGET_MS 100u      /* ADTS: time a seek (or the open) may spend walking frame headers */
+#define AMPAAC_OPEN_WALK     131072u   /* ADTS: bytes of frame headers the open walks for the length estimate
+                                          (the bytes FMOD buffers before READY at AMP's stream buffer) */
 #ifndef AMPAAC_RESYNC_LIMIT                /* the fuzz build lowers it, so small inputs reach it */
 #define AMPAAC_RESYNC_LIMIT  1048576u  /* ADTS: bytes one resync scans before the stream counts as ended */
 #endif
@@ -169,6 +171,7 @@ FMOD_RESULT ampaac_adts_seek(ampaac_codec* aac, unsigned int targetPcm);
 void        ampaac_adts_reset_index(ampaac_codec* aac);
 void        ampaac_adts_estimate_length(ampaac_codec* aac);
 void        ampaac_adts_walk_to_end(ampaac_codec* aac);
+void        ampaac_adts_walk_open(ampaac_codec* aac);
 
 FMOD_RESULT ampaac_mp4_open(ampaac_codec* aac);
 void        ampaac_mp4_set_trim(ampaac_codec* aac);

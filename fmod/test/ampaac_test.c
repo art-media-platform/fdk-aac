@@ -280,14 +280,14 @@ static void test_fixture(const fixture* fx) {
         CHECK(whole.frames == want, "decoded %u frames, want exactly 3.0 s (%u)", whole.frames, want);
         CHECK(whole.declaredLength == want, "declared length %u, want %u", whole.declaredLength, want);
     } else {
-        /* FMOD ends a stream at the declared length, so ADTS declares none; the estimate travels as a tag
-           and becomes exact at EOF. */
+        /* FMOD ends a stream at the declared length, so ADTS declares one only when the open's walk reached
+           the end, as it does for these short files; a longer stream's estimate travels as a tag. */
         CHECK(whole.frames >= want && whole.frames <= want + want / 10,
               "decoded %u frames, want 3.0 s (%u) plus encoder priming and padding", whole.frames, want);
-        CHECK(whole.declaredLength == AMPAAC_UNKNOWN, "declared length %u, want unknown", whole.declaredLength);
-        CHECK(whole.tagAtOpenMs > 0 && fabs((double)whole.tagAtOpenMs - frames_to_ms(whole.frames, whole.rate))
-              < frames_to_ms(whole.frames, whole.rate) * 0.15,
-              "length tag at open %u ms vs decoded %u ms", whole.tagAtOpenMs, frames_to_ms(whole.frames, whole.rate));
+        CHECK(whole.declaredLength == whole.frames, "declared length %u, want the walked %u", whole.declaredLength,
+              whole.frames);
+        CHECK(whole.tagAtOpenMs == frames_to_ms(whole.frames, whole.rate), "length tag at open %u ms, want exact %u ms",
+              whole.tagAtOpenMs, frames_to_ms(whole.frames, whole.rate));
     }
     CHECK(whole.tagAtEndMs == frames_to_ms(whole.frames, whole.rate),
           "length tag at EOF %u ms, want exact %u ms", whole.tagAtEndMs, frames_to_ms(whole.frames, whole.rate));
@@ -1237,6 +1237,48 @@ static void test_far_seek(void) {
     CHECK(fake_live_allocations() == 0, "far seek: %ld allocations leaked", fake_live_allocations());
 }
 
+/* A long ADTS stream that opens quietly (VBR: 4 s of 13-byte silence frames, then 120 s of ~157-byte tone frames):
+   the length estimate at open comes from the first 128 KiB the open walks, not the probe's 8 KB, which held
+   mostly silence and put the length at about 4x. */
+static void test_length_estimate(void) {
+    blob           silence = load("adts_lc_44k_silence.aac");
+    blob           tone = load("adts_lc_44k_stereo.aac");
+    unsigned int   size = silence.size * 2 + tone.size * 40;
+    unsigned char* data = (unsigned char*)malloc(size);
+    unsigned int   at = 0;
+    unsigned int   n;
+    decoded        whole;
+    fake_file      file;
+    FMOD_RESULT    res;
+
+    printf("length estimate\n");
+    for (n = 0; n < 2; n++, at += silence.size) {
+        memcpy(data + at, silence.data, silence.size);
+    }
+    for (n = 0; n < 40; n++, at += tone.size) {
+        memcpy(data + at, tone.data, tone.size);
+    }
+    res = decode_blob(data, size, 4096, &whole);
+    CHECK(res == FMOD_OK && whole.frames > 120 * 44100, "quiet-opening ADTS: %d, %u frames", res, whole.frames);
+    fake_file_init(&file, data, size);
+    if (res == FMOD_OK && open_file(&file, 0) == FMOD_OK) {
+        double truth = frames_to_ms(whole.frames, 44100);
+        CHECK(file.state.waveformat->lengthpcm == AMPAAC_UNKNOWN, "quiet-opening ADTS: declared %u, want unknown",
+              file.state.waveformat->lengthpcm);
+        CHECK(file.lengthTags > 0 && fabs((double)file.lengthTagMs - truth) < truth * 0.25,
+              "quiet-opening ADTS: length tag at open %u ms, decoded %.0f ms (want within 25 %%)", file.lengthTagMs,
+              truth);
+        close_file(&file);
+    }
+    if (res == FMOD_OK) {
+        free(whole.pcm);
+    }
+    free(data);
+    free(silence.data);
+    free(tone.data);
+    CHECK(fake_live_allocations() == 0, "length estimate: %ld allocations leaked", fake_live_allocations());
+}
+
 /* A decode loop that never ends must fail the run, not hang it. */
 static void on_watchdog(int sig) {
     static const char msg[] = "  FAIL watchdog: the tests ran past 600 s (a loop that does not end)\n";
@@ -1271,6 +1313,7 @@ int main(int argc, char** argv) {
     test_limits();
     test_rate_restart();
     test_far_seek();
+    test_length_estimate();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

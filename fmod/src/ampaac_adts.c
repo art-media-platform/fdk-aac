@@ -268,12 +268,14 @@ FMOD_RESULT ampaac_adts_next(ampaac_codec* aac, unsigned int* auLen) {
 
 /*
  * Walks frame headers from the last anchor toward `target` without decoding, adding anchors. Stops at the
- * frame that holds `target`, at the end of the stream, where the chain breaks, or when `budgetMs` runs out
- * (a still-pulling blob reads slowly; a far seek then estimates rather than waiting on the pull).
+ * frame that holds `target`, at the end of the stream, where the chain breaks, after `maxBytes`, or when
+ * `budgetMs` runs out (a still-pulling blob reads slowly; a far seek then estimates rather than waiting on
+ * the pull).
  */
-static void hop_toward(ampaac_codec* aac, unsigned int target, unsigned int budgetMs) {
+static void hop_toward(ampaac_codec* aac, unsigned int target, unsigned int budgetMs, unsigned int maxBytes) {
     ampaac_reader*     rd = &aac->reader;
     ampaac_index_entry at = *last_anchor(aac);
+    unsigned int       from = at.offset;
     double             deadline = clock_ms() + budgetMs;
     unsigned int       frames = 0;
 
@@ -317,7 +319,7 @@ static void hop_toward(ampaac_codec* aac, unsigned int target, unsigned int budg
         if (++frames % aac->indexStride == 0) {
             index_append(aac, at.offset, at.pcm);
         }
-        if ((frames & 15) == 0 && clock_ms() > deadline) {
+        if (at.offset - from >= maxBytes || ((frames & 15) == 0 && clock_ms() > deadline)) {
             break;
         }
     }
@@ -325,7 +327,17 @@ static void hop_toward(ampaac_codec* aac, unsigned int target, unsigned int budg
 }
 
 void ampaac_adts_walk_to_end(ampaac_codec* aac) {
-    hop_toward(aac, AMPAAC_UNKNOWN, 0xFFFFFFFFu);
+    hop_toward(aac, AMPAAC_UNKNOWN, 0xFFFFFFFFu, AMPAAC_UNKNOWN);
+}
+
+/* The open walks the stream's first AMPAAC_OPEN_WALK bytes: the length estimate comes from their mean frame
+   size, not the probe's 8 KB (a quiet opening under VBR made that 40 % long), a stream that ends inside them
+   declares its exact length, and early seeks land in the index. A stream without a size has no estimate to
+   improve, and a live one delivers these bytes only in real time. */
+void ampaac_adts_walk_open(ampaac_codec* aac) {
+    if (aac->reader.size != AMPAAC_UNKNOWN) {
+        hop_toward(aac, AMPAAC_UNKNOWN, ampaac_hop_budget_ms, AMPAAC_OPEN_WALK);
+    }
 }
 
 /* Mean frame size over the exactly walked region once it holds enough frames, else the head window's. */
@@ -374,7 +386,7 @@ FMOD_RESULT ampaac_adts_seek(ampaac_codec* aac, unsigned int targetPcm) {
         /* The walk covers only bytes a netstream likely holds already (FMOD's ring is 256 KiB at AMP's stream
            buffer): one of its reads waits for bytes still arriving, which the time budget cannot cut short.
            A farther target is estimated at once, so its Range is the first request the server sees. */
-        hop_toward(aac, start, ampaac_hop_budget_ms);
+        hop_toward(aac, start, ampaac_hop_budget_ms, AMPAAC_UNKNOWN);
     }
     last = last_anchor(aac);
 

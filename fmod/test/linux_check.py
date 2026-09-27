@@ -128,7 +128,8 @@ def check_play(report, args, name):
         report.check(name, "length", declared == want_ms, f"declared {declared} ms (exact {want_ms})")
         end_ms = want_ms
     else:
-        ok = declared == UNKNOWN_LENGTH and tag_end is not None and want_ms <= tag_end <= want_ms + ADTS_TAIL_MS
+        # These short files end inside the open's 128 KiB walk: their exact length is declared at open.
+        ok = tag_end is not None and declared == tag_end and want_ms <= tag_end <= want_ms + ADTS_TAIL_MS
         report.check(name, "length", ok, f"declared {'unknown' if declared == UNKNOWN_LENGTH else declared}; "
                      f"AMPAAC_LENGTH_MS at end {tag_end} (content {want_ms} + priming/padding)")
         end_ms = tag_end or want_ms
