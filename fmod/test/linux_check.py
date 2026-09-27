@@ -30,6 +30,8 @@ TYPE_WAV = 15
 UNKNOWN_LENGTH = 0xFFFFFFFF
 TONE_MS = 3000             # make_fixtures.py SECONDS
 CHIRP_MS = 1500            # make_fixtures.py CHIRP_SECONDS
+# make_fixtures.py MULTICHANNEL: 1 s parts; fdk's mixer pins 3 and 5 channels to 6 (3/0/2.1).
+LAYOUTS = {"adts_lc_44k_3ch.aac": (1000, 6), "adts_lc_44k_5ch_then_stereo.aac": (2000, 6)}
 CONTROL_MS = 2000
 ADTS_TAIL_MS = 200         # ADTS carries no gapless data: encoder priming + last-frame padding play
 END_SLACK_MS = 150         # last polled position vs. the end (5 ms polls, 1024-sample mixer blocks)
@@ -108,10 +110,17 @@ def opened(report, subject, fields, errors, want_type, want_channels, ampaac=Tru
     return ready
 
 
+def expected(name):
+    """Content length (ms) and FMOD channel count of a fixture."""
+    if name in LAYOUTS:
+        return LAYOUTS[name]
+    return (CHIRP_MS if name.startswith("chirp_") else TONE_MS), (1 if "mono" in name else 2)
+
+
 def check_play(report, args, name):
-    want_ms = CHIRP_MS if name.startswith("chirp_") else TONE_MS
+    want_ms, channels = expected(name)
     fields, errors = harness(args, "play", name)
-    if not opened(report, name, fields, errors, TYPE_PLUGIN, 1 if "mono" in name else 2):
+    if not opened(report, name, fields, errors, TYPE_PLUGIN, channels):
         return
     declared = number(fields, "length_open_ms")
     tag_end = number(fields, "tag_end_ms")
