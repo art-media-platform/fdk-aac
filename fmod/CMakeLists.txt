@@ -96,9 +96,11 @@ set(FDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 get_filename_component(FDK_ROOT_ABS "${FDK_ROOT}" REALPATH)
 
 # Sources are named relative to the repository in the binaries (__FILE__, debug info), never by the
-# builder's absolute path.
+# builder's absolute path. Stack protection on every leg (Apple clang and the NDK default to it; zig and
+# llvm-mingw do not): the decoder parses untrusted network input.
 if(NOT MSVC)
-    add_compile_options("-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/../=" "-ffile-prefix-map=${FDK_ROOT_ABS}/=")
+    add_compile_options("-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/../=" "-ffile-prefix-map=${FDK_ROOT_ABS}/="
+                        -fstack-protector-strong)
 endif()
 set(FDK_DECODER_MODULES
     libAACdec libArithCoding libDRCdec libFDK libMpegTPDec libPCMutils libSACdec libSBRdec libSYS)
@@ -193,10 +195,13 @@ else()
         target_link_options(ampaac PRIVATE -Wl,-dead_strip $<$<CONFIG:Release>:-Wl,-x>)
     elseif(AMPAAC_PLATFORM STREQUAL "WINDOWS")
         # PDB beside the DLL (kept out of the app); compiler-rt, libunwind and the CRT startup linked in.
+        # --gc-sections is explicit: lld leaves unreferenced sections in when it writes a PDB. --strip-all
+        # drops the DWARF that llvm-mingw's prebuilt runtime objects carry (the PDB keeps the symbols).
         set_target_properties(ampaac PROPERTIES PREFIX "")
         target_compile_options(ampaac PRIVATE -g -gcodeview)
         target_compile_options(fdkdec PRIVATE -g -gcodeview)
-        target_link_options(ampaac PRIVATE -static -Wl,--exclude-all-symbols -Wl,--no-insert-timestamp -Wl,--pdb= -Wl,-Xlink=-pdbaltpath:%_PDB%)
+        target_link_options(ampaac PRIVATE -static -Wl,--gc-sections -Wl,--exclude-all-symbols -Wl,--no-insert-timestamp
+                            -Wl,--pdb= -Wl,-Xlink=-pdbaltpath:%_PDB% $<$<CONFIG:Release>:-Wl,--strip-all>)
     else()
         target_link_options(ampaac PRIVATE -Wl,--gc-sections -Wl,--no-undefined $<$<CONFIG:Release>:-s>)
         target_link_libraries(ampaac PRIVATE m)

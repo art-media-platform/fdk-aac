@@ -5,6 +5,7 @@
 #   make osx | ios | android | windows | linux   build one platform
 #   make all                                     every platform
 #   make test                                    host tests (macOS); SAN=1 adds ASan + UBSan
+#   make check                                   check every built library against its platform contract
 #   make install                                 copy every built library into the Unity libs tree
 #   make clean | help
 #
@@ -79,7 +80,7 @@ define cmake-build
 	echo "ampaac: $(1) built -> $$(sed -n 2p "$(BUILD_DIR)/artifact.txt")"
 endef
 
-.PHONY: help all osx ios android windows windows-build linux linux-build test install clean
+.PHONY: help all osx ios android windows windows-build linux linux-build test check install clean
 
 help:
 	@echo "ampaac — make targets"
@@ -88,6 +89,7 @@ help:
 	@echo "  BUILD_ROOT:    $(BUILD_ROOT)"
 	@echo "  make osx | ios | android | windows | linux | all"
 	@echo "  make test      host tests (SAN=1 for ASan + UBSan)"
+	@echo "  make check     check built libraries: arch, OS floor, deps, exports, hardening, revision stamp"
 	@echo "  make install   copy built libraries into UNITY_LIBS (temp + rename)"
 	@echo "  make clean     remove BUILD_ROOT (also after a Unity editor upgrade)"
 
@@ -140,6 +142,11 @@ test:
 		> "$(TEST_DIR)/configure.log"
 	MAKEFLAGS= $(CMAKE) --build "$(TEST_DIR)" --target ampaac_test --parallel $(JOBS)
 	"$(TEST_DIR)/ampaac_test" "$(FMOD_DIR)/test/fixtures"
+
+# Checks every built library against its platform contract (ELF and PE legs use llvm-mingw's LLVM tools).
+check:
+	python3 "$(FMOD_DIR)/test/check_legs.py" --build-root "$(BUILD_ROOT)" --build-type $(BUILD_TYPE_LC) \
+		--llvm-bin "$(LLVM_MINGW_ROOT)/bin"
 
 # Copies each built library to UNITY_LIBS/<subdir>/ through a temp name + rename.
 install:
