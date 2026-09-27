@@ -36,8 +36,9 @@ FMOD_API_INC ?=
 unity-engine-path = $(shell python3 "$(UNITY_PROJ)/cmd/tools.py" --project-path "$(UNITY_PROJ)" --get-engine-path)
 ANDROID_NDK       = $(unity-engine-path)/PlaybackEngines/AndroidPlayer/NDK
 
-LLVM_MINGW_ROOT ?=
-ZIG             ?= zig
+# Pinned cross toolchains (release + SHA-256 in README.md), unpacked outside the repository.
+LLVM_MINGW_ROOT ?= $(HOME)/Applications/llvm-mingw-20260922-ucrt-macos-universal
+ZIG             ?= $(HOME)/Applications/zig-aarch64-macos-0.16.0/zig
 
 # --- Build settings ---------------------------------------------------------
 
@@ -78,7 +79,7 @@ define cmake-build
 	echo "ampaac: $(1) built -> $$(sed -n 2p "$(BUILD_DIR)/artifact.txt")"
 endef
 
-.PHONY: help all osx ios android windows linux test install clean
+.PHONY: help all osx ios android windows windows-build linux linux-build test install clean
 
 help:
 	@echo "ampaac — make targets"
@@ -115,6 +116,10 @@ windows-build:
 	$(call cmake-build,windows-x86_64,-DAMPAAC_PLATFORM=WINDOWS -DCMAKE_TOOLCHAIN_FILE="$(FMOD_DIR)/cmake/windows-x86_64.cmake")
 
 linux:
+	if [ ! -x "$(ZIG)" ]; then \
+		echo "ampaac: set ZIG to the zig executable (zig 0.16.0)"; \
+		exit 1; \
+	fi
 	ZIG="$(ZIG)" $(MAKE) --no-print-directory linux-build
 
 linux-build:

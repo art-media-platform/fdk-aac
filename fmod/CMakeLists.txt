@@ -93,6 +93,13 @@ set(CMAKE_CXX_VISIBILITY_PRESET      hidden)
 # compiled). Upstream's lists name the same files; a new decoder directory would show up as link errors.
 
 set(FDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
+get_filename_component(FDK_ROOT_ABS "${FDK_ROOT}" REALPATH)
+
+# Sources are named relative to the repository in the binaries (__FILE__, debug info), never by the
+# builder's absolute path.
+if(NOT MSVC)
+    add_compile_options("-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/../=" "-ffile-prefix-map=${FDK_ROOT_ABS}/=")
+endif()
 set(FDK_DECODER_MODULES
     libAACdec libArithCoding libDRCdec libFDK libMpegTPDec libPCMutils libSACdec libSBRdec libSYS)
 
@@ -106,6 +113,9 @@ endforeach()
 
 add_library(fdkdec OBJECT ${FDK_DECODER_SOURCES})
 target_include_directories(fdkdec PRIVATE ${FDK_DECODER_INCLUDES})
+# Reproducible objects: every __DATE__/__TIME__ the decoder modules expand sits behind this upstream switch
+# (zig's clang rejects the expansion outright: -Werror=date-time).
+target_compile_definitions(fdkdec PRIVATE SUPPRESS_BUILD_DATE_INFO)
 if(MSVC)
     target_compile_options(fdkdec PRIVATE /EHs-c- /GR-)
 else()
@@ -182,8 +192,11 @@ else()
     if(APPLE)
         target_link_options(ampaac PRIVATE -Wl,-dead_strip $<$<CONFIG:Release>:-Wl,-x>)
     elseif(AMPAAC_PLATFORM STREQUAL "WINDOWS")
+        # PDB beside the DLL (kept out of the app); compiler-rt, libunwind and the CRT startup linked in.
         set_target_properties(ampaac PROPERTIES PREFIX "")
-        target_link_options(ampaac PRIVATE -static -Wl,--exclude-all-symbols -Wl,--no-insert-timestamp)
+        target_compile_options(ampaac PRIVATE -g -gcodeview)
+        target_compile_options(fdkdec PRIVATE -g -gcodeview)
+        target_link_options(ampaac PRIVATE -static -Wl,--exclude-all-symbols -Wl,--no-insert-timestamp -Wl,--pdb= -Wl,-Xlink=-pdbaltpath:%_PDB%)
     else()
         target_link_options(ampaac PRIVATE -Wl,--gc-sections -Wl,--no-undefined $<$<CONFIG:Release>:-s>)
         target_link_libraries(ampaac PRIVATE m)

@@ -42,5 +42,4 @@ clang++ \$SAN *.o -o ampaac_fuzz
 echo \"fuzz: \$(clang --version | head -1); corpus \$(ls /corpus | wc -l) files; \${SECONDS_TO_RUN:-$SECONDS_TO_RUN} s\"
 ./ampaac_fuzz -max_total_time=$SECONDS_TO_RUN -rss_limit_mb=4096 -timeout=10 -print_final_stats=1 \\
     -jobs=\$(nproc) -workers=\$(nproc) -artifact_prefix=/artifacts/ /corpus
-cat fuzz-*.log | grep -E 'stat::|ERROR|SUMMARY|crash-|leak-|timeout-' || true
 "
