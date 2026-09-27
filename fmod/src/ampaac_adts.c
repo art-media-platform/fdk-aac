@@ -385,8 +385,10 @@ FMOD_RESULT ampaac_adts_seek(ampaac_codec* aac, unsigned int targetPcm) {
         && (unsigned long long)(start - last->pcm) / aac->pcmPerFrame * mean_frame_bytes(aac) <= AMPAAC_READ_THROUGH) {
         /* The walk covers only bytes a netstream likely holds already (FMOD's ring is 256 KiB at AMP's stream
            buffer): one of its reads waits for bytes still arriving, which the time budget cannot cut short.
-           A farther target is estimated at once, so its Range is the first request the server sees. */
-        hop_toward(aac, start, ampaac_hop_budget_ms, AMPAAC_UNKNOWN);
+           A farther target is estimated at once, so its Range is the first request the server sees. The walk
+           also stops after AMPAAC_READ_THROUGH bytes whatever the mean predicted (a quiet VBR opening makes it
+           low). */
+        hop_toward(aac, start, ampaac_hop_budget_ms, AMPAAC_READ_THROUGH);
     }
     last = last_anchor(aac);
 

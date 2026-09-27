@@ -1340,6 +1340,39 @@ static void test_audit_round3(void) {
         free(adts.data);
     }
 
+    /* The seek walk stops after AMPAAC_READ_THROUGH bytes whatever the mean frame size predicted: 232 s of 13-byte
+       silence frames make the mean low, and a seek to 300 s would otherwise walk ~470 KB of tone frames. */
+    {
+        blob           silence = load("adts_lc_44k_silence.aac");
+        blob           tone = load("adts_lc_44k_stereo.aac");
+        unsigned int   quietSize;
+        unsigned int   loudSize;
+        unsigned char* quiet = repeat_blob(&silence, 116, &quietSize);
+        unsigned char* loud = repeat_blob(&tone, 40, &loudSize);
+        unsigned char* data = (unsigned char*)malloc(quietSize + loudSize);
+
+        memcpy(data, quiet, quietSize);
+        memcpy(data + quietSize, loud, loudSize);
+        fake_file_init(&file, data, quietSize + loudSize);
+        res = open_file(&file, 0);
+        CHECK(res == FMOD_OK, "quiet then loud ADTS: open %d", res);
+        if (res == FMOD_OK) {
+            unsigned int reads = file.reads;
+            unsigned int seeks = file.seeks;
+
+            res = codec()->setposition(&file.state, 0, 300 * 44100, FMOD_TIMEUNIT_PCM);
+            CHECK(res == FMOD_OK && file.reads - reads <= 80,
+                  "seek to 300 s past a quiet opening: %d after %u reads and %u source seeks, want at most 80 reads", res,
+                  file.reads - reads, file.seeks - seeks);
+            close_file(&file);
+        }
+        free(data);
+        free(quiet);
+        free(loud);
+        free(silence.data);
+        free(tone.data);
+    }
+
     CHECK(fake_live_allocations() == 0, "audit round 3: %ld allocations leaked", fake_live_allocations());
 }
 
