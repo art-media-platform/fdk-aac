@@ -7,6 +7,7 @@
 #   make test                                    host tests (macOS, both slices under Rosetta); SAN=1 adds ASan + UBSan
 #   make check                                   check every built library against its platform contract
 #   make linux-test                              Linux leg in an amd64 container with FMOD's own Linux library
+#   make fuzz                                    libFuzzer + ASan + UBSan in a Linux container (FUZZ_SECONDS)
 #   make install                                 copy every built library into the Unity libs tree
 #   make clean | help
 #
@@ -51,6 +52,9 @@ GENERATOR    ?= Unix Makefiles
 JOBS         ?= $(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
 SPIKE        ?=
 SAN          ?=
+# Any UBSan report fails the run; fdk's fixed-point code left-shifts negative values by design (shift-base).
+SAN_FLAGS     = -fsanitize=address,undefined -fno-sanitize=shift-base -fno-sanitize-recover=all -fno-omit-frame-pointer
+FUZZ_SECONDS ?= 1800
 
 # Not exported: `cmake --build` treats any VERBOSE in the environment, even empty, as verbose.
 VERBOSE      ?=
@@ -81,7 +85,7 @@ define cmake-build
 	echo "ampaac: $(1) built -> $$(sed -n 2p "$(BUILD_DIR)/artifact.txt")"
 endef
 
-.PHONY: help all osx ios android windows windows-build linux linux-build test check linux-test install clean
+.PHONY: help all osx ios android windows windows-build linux linux-build test check linux-test fuzz install clean
 
 help:
 	@echo "ampaac — make targets"
@@ -92,6 +96,7 @@ help:
 	@echo "  make test      host tests (SAN=1 for ASan + UBSan)"
 	@echo "  make check     check built libraries: arch, OS floor, deps, exports, hardening, revision stamp"
 	@echo "  make linux-test  Linux leg: host tests + FMOD's libfmodstudio.so in an amd64 container (docker)"
+	@echo "  make fuzz      libFuzzer + ASan + UBSan in a Linux container, FUZZ_SECONDS (default 1800)"
 	@echo "  make install   copy built libraries into UNITY_LIBS (temp + rename)"
 	@echo "  make clean     remove BUILD_ROOT (also after a Unity editor upgrade)"
 
@@ -138,8 +143,7 @@ test:
 	$(CMAKE) -S "$(FMOD_DIR)" -B "$(TEST_DIR)" -G "$(GENERATOR)"                          \
 		-DCMAKE_BUILD_TYPE=RelWithDebInfo -DAMPAAC_PLATFORM=OSX -DAMPAAC_TESTS=ON                    \
 		-DFMOD_API_INC:PATH="$(FMOD_API_INC)"                                               \
-		$(if $(SAN),"-DCMAKE_C_FLAGS=-fsanitize=address$(,)undefined -fno-omit-frame-pointer" \
-		            "-DCMAKE_CXX_FLAGS=-fsanitize=address$(,)undefined -fno-omit-frame-pointer" \
+		$(if $(SAN),"-DCMAKE_C_FLAGS=$(SAN_FLAGS)" "-DCMAKE_CXX_FLAGS=$(SAN_FLAGS)" \
 		            "-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address$(,)undefined")              \
 		> "$(TEST_DIR)/configure.log"
 	MAKEFLAGS= $(CMAKE) --build "$(TEST_DIR)" --target ampaac_test --parallel $(JOBS)
@@ -151,11 +155,16 @@ test:
 
 linux-test:
 	$(require-fmod)
-	ZIG="$(ZIG)" FMOD_API_INC="$(FMOD_API_INC)" "$(FMOD_DIR)/test/linux.sh" "$(FMOD_LINUX_LIB)"
+	ZIG="$(ZIG)" FMOD_API_INC="$(FMOD_API_INC)" LINUX_TEST_BUILD="$(BUILD_ROOT)/linux-x86_64-test" \
+		"$(FMOD_DIR)/test/linux.sh" "$(FMOD_LINUX_LIB)" "$(BUILD_ROOT)/linux-x86_64-$(BUILD_TYPE_LC)/libampaac.so"
+
+fuzz:
+	$(require-fmod)
+	"$(FMOD_DIR)/test/fuzz.sh" $(FUZZ_SECONDS) "$(FMOD_API_INC)"
 
 # Checks every built library against its platform contract (ELF and PE legs use llvm-mingw's LLVM tools).
 check:
-	python3 "$(FMOD_DIR)/test/check_legs.py" --build-root "$(BUILD_ROOT)" --build-type $(BUILD_TYPE_LC) \
+	python3 "$(FMOD_DIR)/test/check_legs.py" --build-root "$(BUILD_ROOT)" --build-type $(BUILD_TYPE_LC) --require-all \
 		--llvm-bin "$(LLVM_MINGW_ROOT)/bin"
 
 # Copies each built library to UNITY_LIBS/<subdir>/ through a temp name + rename.

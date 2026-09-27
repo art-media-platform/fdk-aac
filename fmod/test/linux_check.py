@@ -23,7 +23,7 @@ import urllib.request
 import wave
 from pathlib import Path
 
-PRIORITY = "1000"          # the client's registration priority (behind FMOD's built-in codecs)
+PRIORITY = "1000"          # the client's registration priority (after WAV and Ogg, before FLAC and MPEG)
 PORT = 8791
 TYPE_PLUGIN = 0            # FMOD reports FMOD_SOUND_TYPE_UNKNOWN for a sound a plugin codec opened
 TYPE_WAV = 15
@@ -137,9 +137,11 @@ def check_seek(report, args, name):
         return
     last = number(fields, "last_position_ms")
     stopped = number(fields, "stopped_after_s", float)
-    # Unseeked, the channel would stop after ~3 s; seeking 1 s in to 2 s leaves ~1 s to play.
+    # Unseeked, the channel would stop after ~3 s; seeking 1 s in to 2 s leaves ~1 s to play. Where the
+    # codec lands is the host tests' job (bit-exact against a continuous decode); this checks FMOD's side.
+    remaining = 1.0 + (TONE_MS - SEEK_TO_MS) / 1000
     ok = last is not None and last >= TONE_MS - END_SLACK_MS and stopped is not None and \
-        stopped <= 1.0 + (TONE_MS - SEEK_TO_MS + ADTS_TAIL_MS) / 1000 + 0.3
+        remaining - 0.3 <= stopped <= remaining + ADTS_TAIL_MS / 1000 + 0.3
     report.check(subject, "seek", ok, f"seek {fields.get('seek_to_ms')} ms at {fields.get('seek_at_s')} s; "
                  f"stopped after {stopped} s at {last} ms")
 

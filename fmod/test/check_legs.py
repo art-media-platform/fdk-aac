@@ -24,6 +24,9 @@ ANDROID_API = 27
 ANDROID_PAGE = 0x4000
 ANDROID_NEEDED = {"libc.so", "libm.so", "libdl.so"}
 LINUX_NEEDED = {"libc.so.6", "libm.so.6"}
+LEGS = ("OSX", "iOS", "Android", "Linux", "Windows")
+# Absolute-path prefixes that never belong in a shipped binary, besides the builder's own paths.
+BUILDER_PREFIXES = ("/Users/", "/home/", "/private/", "/tmp/", "/var/folders/")
 LINUX_GLIBC_MAX = (2, 28)
 WINDOWS_IMPORT = re.compile(r"^(KERNEL32\.dll|api-ms-win-crt-[a-z]+-l1-1-0\.dll)$", re.IGNORECASE)
 
@@ -76,7 +79,7 @@ def common_checks(report, leg, artifact, undefined, args):
     ok = stamps == {rev} and (args.allow_dirty or not rev.endswith("-dirty"))
     report.check(leg, "revision", ok, f"stamp {', '.join(sorted(stamps)) or 'missing'}; fork HEAD {rev}")
 
-    leaks = [p for p in args.builder_paths if p.encode() in data]
+    leaks = [p for p in args.builder_paths + list(BUILDER_PREFIXES) if p.encode() in data]
     report.check(leg, "builder paths", not leaks, "none embedded" if not leaks else f"embedded: {', '.join(leaks)}")
 
     if undefined is not None:
@@ -143,7 +146,7 @@ def elf_basics(report, leg, artifact, args, machine):
 
 def check_android(report, leg, artifact, args):
     needed, undefined = elf_basics(report, leg, artifact, args, "AArch64")
-    report.check(leg, "needed", set(needed) <= ANDROID_NEEDED, " ".join(needed))
+    report.check(leg, "needed", "libc.so" in needed and set(needed) <= ANDROID_NEEDED, " ".join(needed) or "none parsed")
     aligns = [int(line.split()[-1], 16) for line in run(args.tool("llvm-readelf"), "-lW", str(artifact))
               .splitlines() if line.strip().startswith("LOAD")]
     report.check(leg, "LOAD align", aligns and all(a == ANDROID_PAGE for a in aligns),
@@ -157,7 +160,7 @@ def check_android(report, leg, artifact, args):
 
 def check_linux(report, leg, artifact, args):
     needed, undefined = elf_basics(report, leg, artifact, args, "Advanced Micro Devices X86-64")
-    report.check(leg, "needed", set(needed) <= LINUX_NEEDED, " ".join(needed))
+    report.check(leg, "needed", "libc.so.6" in needed and set(needed) <= LINUX_NEEDED, " ".join(needed) or "none parsed")
     versions = {tuple(int(p) for p in v.split(".")) for v in
                 re.findall(r"Name: GLIBC_([0-9.]+)", run(args.tool("llvm-readelf"), "-V", str(artifact)))}
     top = max(versions) if versions else None
@@ -179,14 +182,20 @@ def check_windows(report, leg, artifact, args):
     report.check(leg, "exports", exports == EXPORTS, " ".join(sorted(exports)))
     sections = re.findall(r"^\s*\d+\s+(\S+)", run(args.tool("llvm-objdump"), "-h", str(artifact)), re.MULTILINE)
     dwarf = [s for s in sections if s.startswith(".debug")]
-    report.check(leg, "no DWARF", not dwarf, " ".join(sections) if not dwarf else " ".join(dwarf))
+    report.check(leg, "no DWARF", ".text" in sections and not dwarf, " ".join(dwarf or sections) or "no sections parsed")
     debug = run(args.tool("llvm-readobj"), "--coff-debug-directory", str(artifact))
     pdb_name = re.search(r"PDBFileName: (\S+)", debug)
     pdb_name = pdb_name.group(1) if pdb_name else None
     report.check(leg, "PDB reference", pdb_name == "ampaac.pdb", f"{pdb_name} (a bare file name)")
+    # The DLL links its runtime statically, so its imports cannot show a C++ runtime or stack protection:
+    # the PDB's public symbols can.
     pdb = artifact.with_suffix(".pdb")
-    publics = run(args.tool("llvm-pdbutil"), "dump", "-publics", str(pdb)) if pdb.exists() else ""
-    report.check(leg, "stack protector", "`__stack_chk_fail`" in publics,
+    publics = set(re.findall(r"`([^`]+)`", run(args.tool("llvm-pdbutil"), "dump", "-publics", str(pdb)))) \
+        if pdb.exists() else set()
+    cxx = sorted(s for s in publics if CXX_RUNTIME.match(s))
+    report.check(leg, "no C++ runtime", publics and not cxx, ("PDB lists no C++ runtime symbol" if not cxx
+                 else ", ".join(cxx)) if publics else f"{pdb.name} missing")
+    report.check(leg, "stack protector", "__stack_chk_fail" in publics,
                  "PDB lists __stack_chk_fail" if publics else f"{pdb.name} missing")
     common_checks(report, leg, artifact, None, args)
 
@@ -208,6 +217,7 @@ def main():
     parser.add_argument("--llvm-bin", type=Path, help="directory holding llvm-readelf, llvm-nm, llvm-objdump, "
                         "llvm-readobj, llvm-pdbutil (ELF and PE legs)")
     parser.add_argument("--allow-dirty", action="store_true", help="accept a -dirty revision stamp")
+    parser.add_argument("--require-all", action="store_true", help=f"fail unless every leg is built ({', '.join(LEGS)})")
     args = parser.parse_args()
 
     fork = fmod_dir.parent
@@ -234,6 +244,11 @@ def main():
             report.check(leg, "tooling", False, str(err))
 
     print(f"check_legs: {len(manifests)} legs, {report.checks} checks, {report.failed} failed")
+    if args.require_all:
+        built = {manifest.read_text().splitlines()[0].split("/")[0] for manifest in manifests}
+        for leg in LEGS:
+            if leg not in built:
+                report.check(leg, "built", False, f"no {args.build_type} build under {args.build_root}")
     if not manifests or report.failed:
         sys.exit(1)
 

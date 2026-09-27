@@ -40,6 +40,6 @@ for f in /src/fmod/src/ampaac_codec.c /src/fmod/src/ampaac_io.c /src/fmod/src/am
 done
 clang++ \$SAN *.o -o ampaac_fuzz
 echo \"fuzz: \$(clang --version | head -1); corpus \$(ls /corpus | wc -l) files; \${SECONDS_TO_RUN:-$SECONDS_TO_RUN} s\"
-./ampaac_fuzz -max_total_time=$SECONDS_TO_RUN -rss_limit_mb=4096 -timeout=10 -print_final_stats=1 \\
+./ampaac_fuzz -max_total_time=$SECONDS_TO_RUN -max_len=262144 -rss_limit_mb=4096 -timeout=10 -print_final_stats=1 \\
     -jobs=\$(nproc) -workers=\$(nproc) -artifact_prefix=/artifacts/ /corpus
 "

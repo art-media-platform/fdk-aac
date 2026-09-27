@@ -26,9 +26,6 @@ endif()
 if(NOT DEFINED FMOD_API_INC OR NOT EXISTS "${FMOD_API_INC}/fmod_codec.h")
     message(FATAL_ERROR "FMOD_API_INC must name the FMOD Engine SDK's api/core/inc (fmod_codec.h not found in '${FMOD_API_INC}')")
 endif()
-if(NOT DEFINED APPLE_PLATFORMS_PATH)
-    set(APPLE_PLATFORMS_PATH "/Applications/Xcode.app/Contents/Developer/Platforms")
-endif()
 
 if(AMPAAC_PLATFORM STREQUAL "ANDROID")
     set(CMAKE_SYSTEM_NAME                   "Android")
@@ -43,7 +40,13 @@ elseif(AMPAAC_PLATFORM STREQUAL "IOS")
     set(CMAKE_SYSTEM_PROCESSOR      "arm64")
     set(CMAKE_OSX_ARCHITECTURES     "arm64" CACHE STRING "" FORCE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "12.4" CACHE STRING "" FORCE)
-    set(CMAKE_OSX_SYSROOT           "${APPLE_PLATFORMS_PATH}/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk" CACHE PATH "" FORCE)
+    # The SDK of the Xcode that xcode-select names, the same one the compiler comes from.
+    execute_process(COMMAND xcrun --sdk iphoneos --show-sdk-path
+                    OUTPUT_VARIABLE _ios_sdk OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE _ios_rc)
+    if(NOT _ios_rc EQUAL 0 OR NOT EXISTS "${_ios_sdk}")
+        message(FATAL_ERROR "xcrun found no iphoneos SDK")
+    endif()
+    set(CMAKE_OSX_SYSROOT           "${_ios_sdk}" CACHE PATH "" FORCE)
     set(AMPAAC_INSTALL_SUBDIR       "iOS")
 
 elseif(AMPAAC_PLATFORM STREQUAL "OSX")
@@ -96,10 +99,13 @@ set(FDK_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
 get_filename_component(FDK_ROOT_ABS "${FDK_ROOT}" REALPATH)
 
 # Sources are named relative to the repository in the binaries (__FILE__, debug info), never by the
-# builder's absolute path. Stack protection on every leg (Apple clang and the NDK default to it; zig and
-# llvm-mingw do not): the decoder parses untrusted network input.
+# builder's absolute path, whichever spelling (symlinked or resolved) CMake hands the compiler. Stack
+# protection on every leg (Apple clang and the NDK default to it; zig and llvm-mingw do not): the decoder
+# parses untrusted network input.
 if(NOT MSVC)
+    get_filename_component(_fmod_dir_abs "${CMAKE_CURRENT_SOURCE_DIR}" REALPATH)
     add_compile_options("-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/../=" "-ffile-prefix-map=${FDK_ROOT_ABS}/="
+                        "-ffile-prefix-map=${CMAKE_CURRENT_SOURCE_DIR}/=fmod/" "-ffile-prefix-map=${_fmod_dir_abs}/=fmod/"
                         -fstack-protector-strong)
 endif()
 set(FDK_DECODER_MODULES
@@ -132,7 +138,9 @@ set(AMPAAC_SOURCE_REV "unknown")
 if(GIT_FOUND)
     execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${FDK_ROOT}" rev-parse --short HEAD
                     OUTPUT_VARIABLE _rev OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET RESULT_VARIABLE _rev_rc)
-    execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${FDK_ROOT}" status --porcelain --untracked-files=no
+    # Untracked files count in the directories the build globs: they would be compiled into the binary.
+    execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${FDK_ROOT}" status --porcelain --untracked-files=all
+                            -- ${FDK_DECODER_MODULES} fmod
                     OUTPUT_VARIABLE _dirty OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
     if(_rev_rc EQUAL 0)
         set(AMPAAC_SOURCE_REV "${_rev}")

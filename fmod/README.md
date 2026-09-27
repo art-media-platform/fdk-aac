@@ -1,9 +1,10 @@
 # ampaac — AAC Decoding for FMOD
 
-`ampaac` is an FMOD codec plugin that decodes AAC with the Fraunhofer FDK AAC decoder in this repository. It
-plays files and HTTP netstreams on macOS, iOS, Android, Windows and Linux, which FMOD's built-in codecs do
-not (FMOD's platform AAC codecs on iOS and Android decode only files on disk). It decodes only: the
-encoder is never compiled.
+`ampaac` is an FMOD codec plugin that decodes AAC with the Fraunhofer FDK AAC decoder in this repository.
+It builds for macOS, iOS, Android, Windows and Linux and lets FMOD play AAC files and HTTP netstreams, which
+FMOD's built-in codecs do not (FMOD's platform AAC codecs on iOS and Android decode only files on disk). It
+decodes only: the encoder is never compiled. Run-time behavior is verified on macOS and Linux x86_64 with
+FMOD 2.03.14; the iOS, Android and Windows libraries are verified by `make check` only.
 
 This directory is the art.media.platform (AMP) addition to the fork. No file of the FDK AAC Codec is
 modified (see [Changes to the FDK AAC Codec](#changes-to-the-fdk-aac-codec)).
@@ -16,8 +17,8 @@ modified (see [Changes to the FDK AAC Codec](#changes-to-the-fdk-aac-codec)).
   MP4/M4A with `moov` before or after `mdat`. Fragmented MP4 is rejected.
 - **Output:** 16-bit PCM, 1–8 channels in WAV channel order. The channel count is pinned at open, so a
   mid-stream configuration change cannot change FMOD's format.
-- **Level:** fdk's loudness normalization is off (`AAC_DRC_REFERENCE_LEVEL` = -1), so levels match
-  MP3 and Ogg.
+- **Level:** fdk's loudness normalization is off (`AAC_DRC_REFERENCE_LEVEL` = -1): output keeps the
+  encoded level.
 - **Gapless:** M4A trims the encoder's priming and padding (edit list or `iTunSMPB`) and compensates
   fdk's output delay, so output is sample-aligned with the encoder's input. ADTS carries no gapless data:
   its priming plays, as it does with Apple's decoder.
@@ -40,17 +41,19 @@ codec's data ends sooner, cuts the tail when the data runs longer, and never ask
 - **Netstreams:** every FMOD netstream seek is a new HTTP request, so forward jumps of up to 256 KiB are
   read through instead of seeked.
 - **A body cut short:** when an HTTP body ends before its Content-Length, FMOD neither fails nor
-  reconnects: its net layer serves its 256 KiB receive ring, cycling, with success up to that length, so
-  the codec cannot see the cut. ADTS frames in those stale bytes are valid, so the missing span replays
-  the audio from 256 KiB earlier, as it does with FMOD's own MP3 codec. M4A access units read from stale
-  bytes fail to decode, and fdk's concealment holds the output near silence (under −66 dBFS) to the
-  declared end. A server must never cut a body.
+  reconnects, and reads keep succeeding up to that length, so the codec cannot see the cut. Once FMOD's
+  receive ring (twice the stream buffer size) has wrapped, the missing bytes are its stale contents,
+  cycling; before that, zeros or an early end of file. ADTS frames in stale bytes are valid, so the missing
+  span replays audio from one ring earlier, as it does with FMOD's own MP3 codec. M4A access units read
+  from stale bytes fail to decode, and fdk's concealment holds the output near silence (under −66 dBFS) to
+  the declared end. A server must never cut a body.
 - **Errors:** open returns `FMOD_ERR_FORMAT` only for data that is not AAC; file and network errors pass
   through unchanged.
 - **Memory:** the codec's state and tables come from FMOD's allocator; fdk's decoder calls `calloc`.
 - **Stack:** a decode peaks near 50 KB of stack (`make test` measures it: 49,736 bytes on arm64, 49,800 on
-  x86_64). FMOD's default STREAM (96 KiB) and NONBLOCKING (112 KiB) thread stacks hold that; the AMP client
-  raises both to 192 KiB with `FMOD_Thread_SetAttributes` for headroom.
+  x86_64; fdk's frame decoder alone takes 35.9 KB). FMOD's default STREAM (96 KiB) and NONBLOCKING
+  (112 KiB) thread stacks hold that with under 2× headroom on STREAM; raise both with
+  `FMOD_Thread_SetAttributes` before the first System is created (192 KiB leaves 3.9×).
 
 FMOD reports a sound opened by a plugin codec as `FMOD_SOUND_TYPE_UNKNOWN`.
 
@@ -66,9 +69,12 @@ unsigned int handle = 0;
 FMOD_System_RegisterCodec(system, AMPAAC_GetCodecDescription(), &handle, 1000);
 ```
 
-Registering before or after `System::init` both work. Priority 1000 places ampaac after FMOD's WAV and
-Ogg codecs (WAV measured between 500 and 700) and before MPEG (between 2150 and 2500) and the platform
-codecs (iOS AudioQueue, Android MediaCodec), which cannot netstream AAC. FMOD for Unity's C# wrapper has no
+Registering before or after `System::init` both work. FMOD's manual lists its built-in priorities
+(`System::registerCodec`): WAV 600, Ogg Vorbis 800, AIFF 1000, FLAC 1100, AudioQueue 2200, MediaCodec 2250,
+MPEG 2400. Priority 1000 places ampaac after WAV (measured: between 500 and 700) and Ogg, level with AIFF
+(each rejects the other's data), and before FLAC, MPEG (measured: between 2150 and 2500) and the platform
+codecs, which cannot netstream AAC. Formats tried after ampaac pay its probe: an MP3 open over HTTP made 6
+requests instead of 4. FMOD for Unity's C# wrapper has no
 `registerCodec`: P/Invoke `FMOD5_System_RegisterCodec(IntPtr system, IntPtr description, out uint handle,
 uint priority)` from FMOD's library, and `AMPAAC_GetCodecDescription` from `ampaac` (`__Internal` on iOS,
 where `libampaac.a` links into the app).
@@ -111,8 +117,9 @@ unpacked outside the repository; the Makefile looks for them under `~/Applicatio
 
 Every leg builds with stack protection, keeps the builder's paths out of the binary, and stamps
 `ampaac fdk-aac <revision>` into it (the fork's short commit hash, `-dirty` for uncommitted changes).
-`make check` verifies each built library against its row above: architecture, OS floor, dependencies
-(no C++ runtime), exports, stack protection, embedded paths, and a revision stamp equal to `HEAD`.
+`make check` verifies each built library against its row above: architecture, OS floor (the Windows floor
+follows from its UCRT imports), dependencies, no C++ runtime (imports, and the PDB of the statically linked
+Windows DLL), exports, stack protection, embedded paths, and a revision stamp equal to `HEAD`.
 
 ## Testing
 
@@ -121,7 +128,8 @@ Every leg builds with stack protection, keeps the builder's paths out of the bin
   fixtures; unknown size, truncation and corruption; peak stack depth.
 - `make linux-test` — the host tests on x86_64 Linux, then FMOD's own Linux library playing every fixture
   as an HTTP netstream (`test/serve_range.py`), with seeks and a WAV control, in an amd64 container.
-- `test/fuzz.sh <seconds> <FMOD_API_INC>` — libFuzzer + ASan + UBSan in a Linux container.
+- `make fuzz` (`test/fuzz.sh`, `FUZZ_SECONDS`) — libFuzzer + ASan + UBSan in a Linux container. Inputs are
+  capped at the largest seed (about 24 KB), so large-file paths need their own tests.
 - `test/fmod_harness.c` — drives a real FMOD library with the codec registered (open, play, seek, length).
 - `test/make_fixtures.py` — regenerates `test/fixtures/` (macOS `afconvert`).
 
@@ -143,7 +151,7 @@ The decoder is the Fraunhofer FDK AAC Codec Library for Android, under the licen
 
 `NOTICE` §2 requires a modified version to carry prominent notices of its changes and their dates.
 
-- **2026-09-26** — `fmod/` added: the FMOD codec plugin, its build, tests and fixtures. No file of the FDK
+- **2026-09-27** — `fmod/` added: the FMOD codec plugin, its build, tests and fixtures. No file of the FDK
   AAC Codec is modified. The plugin compiles the decoder modules (`libAACdec`, `libArithCoding`,
   `libDRCdec`, `libFDK`, `libMpegTPDec`, `libPCMutils`, `libSACdec`, `libSBRdec`, `libSYS`) as they are,
   with the library's own `SUPPRESS_BUILD_DATE_INFO` switch defined.

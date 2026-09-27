@@ -8,7 +8,7 @@ set -euo pipefail
 FMOD_LIB=${1:?libfmodstudio.so (FMOD for Unity: platforms/linux/lib/x86_64)}
 FMOD_DIR=$(cd "$(dirname "$0")/.." && pwd)
 CODEC=${2:-$FMOD_DIR/build/linux-x86_64-release/libampaac.so}
-BUILD=$FMOD_DIR/build/linux-x86_64-test
+BUILD=${LINUX_TEST_BUILD:-$FMOD_DIR/build/linux-x86_64-test}
 IMAGE=${LINUX_IMAGE:-python:3.12-slim-bookworm}
 : "${ZIG:?ZIG must name the zig executable}" "${FMOD_API_INC:?FMOD_API_INC must name the FMOD SDK api/core/inc}"
 
