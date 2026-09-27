@@ -1,3 +1,6 @@
+#if !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L   /* posix_memalign under strict C11 */
+#endif
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>

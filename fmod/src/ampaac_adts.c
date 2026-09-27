@@ -6,6 +6,9 @@
  * file offsets to PCM exactly: frames are fed one at a time while decoding, and a seek walks frame headers
  * forward (no decode) within a time budget. Past what is walked, positions are estimated.
  */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L   /* clock_gettime under strict C11 */
+#endif
 #include <string.h>
 
 #if defined(_WIN32)
