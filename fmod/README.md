@@ -54,8 +54,8 @@ codec's data ends sooner, cuts the tail when the data runs longer, and never ask
     256 KiB rather than seeking.
   - A seek whose request fails or outlives the network timeout leaves the channel stranded: it reads as
     playing at the target and never ends, and `Sound::getOpenState` returns the error (24 after a 503, 43
-    after the timeout). FMOD's own codecs behave the same; its MP3 codec sends the failed request once more
-    first.
+    after the timeout). FMOD's own codecs behave the same. Both FMOD's MP3 codec and ampaac send a failed
+    request once more first (ampaac not after a timeout, see Errors), so a single 503 recovers.
   - A body that stalls past the network timeout: `getOpenState` returns 43 from then on. FMOD's MP3 codec
     stops the channel; an ampaac stream plays on from stale bytes (below), and its open state reads ERROR
     for only a few milliseconds, so check the result `getOpenState` returns, not only the state.
@@ -80,7 +80,7 @@ codec's data ends sooner, cuts the tail when the data runs longer, and never ask
   finds no frame in 1 MiB (over a hundred maximum-size frames; not logged). These ends read as a normal end
   of file, leave the length an estimate, and a later seek past them plays.
 - **Memory:** the codec's state and tables come from FMOD's allocator; fdk's decoder calls `calloc`.
-- **Stack:** a decode peaks near 50 KB of stack (`make test` measures it: 49,736 bytes on arm64, 49,800 on
+- **Stack:** a decode peaks near 50 KB of stack (`make test` measures it: 49,736 bytes on arm64, 49,832 on
   x86_64; fdk's frame decoder alone takes 35.9 KB). FMOD's default STREAM (96 KiB) and NONBLOCKING
   (112 KiB) thread stacks hold that with under 2× headroom on STREAM; raise both with
   `FMOD_Thread_SetAttributes` before the first System is created (192 KiB leaves 3.9×).
