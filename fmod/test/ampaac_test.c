@@ -4,9 +4,11 @@
  */
 #include <math.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "fake_fmod.h"
 #include "ampaac.h"
@@ -440,7 +442,7 @@ static void test_fixture(const fixture* fx) {
         unsigned int   seed = 12345;
 
         for (n = 0; n < junk; n++) {
-            seed = seed * 1103515245u + 12345u;
+            seed = (unsigned int)(((unsigned long long)seed * 1103515245u + 12345u) & 0xFFFFFFFFu);
             cut[n] = (unsigned char)(seed >> 16);
         }
         memcpy(cut + junk, src.data, src.size);
@@ -719,7 +721,7 @@ static void test_rejects(void) {
     }
 
     for (n = 0; n < sizeof(buf); n++) {
-        seed = seed * 1103515245u + 12345u;
+        seed = (unsigned int)(((unsigned long long)seed * 1103515245u + 12345u) & 0xFFFFFFFFu);
         buf[n] = (unsigned char)(seed >> 16);
     }
     expect_format_error("random", buf, sizeof(buf));
@@ -1235,6 +1237,16 @@ static void test_far_seek(void) {
     CHECK(fake_live_allocations() == 0, "far seek: %ld allocations leaked", fake_live_allocations());
 }
 
+/* A decode loop that never ends must fail the run, not hang it. */
+static void on_watchdog(int sig) {
+    static const char msg[] = "  FAIL watchdog: the tests ran past 600 s (a loop that does not end)\n";
+    (void)sig;
+    if (write(STDOUT_FILENO, msg, sizeof(msg) - 1) < 0) {
+        _exit(4);
+    }
+    _exit(3);
+}
+
 int main(int argc, char** argv) {
     unsigned int i;
 
@@ -1243,6 +1255,9 @@ int main(int argc, char** argv) {
         return 2;
     }
     fixtureDir = argv[1];
+    setvbuf(stdout, NULL, _IOLBF, 0);   /* the last section printed names a hang */
+    signal(SIGALRM, on_watchdog);
+    alarm(600);
 
     for (i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i++) {
         test_fixture(&fixtures[i]);

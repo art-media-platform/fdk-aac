@@ -1,9 +1,9 @@
 /*
- * libFuzzer target: arbitrary bytes as the file FMOD hands the codec, after three control bytes (source
- * quirks, seek targets, a mid-transfer file fault). Exercises the probe, the ADTS walk and resync, the MP4
- * box parser and sample tables, decoding through the drain to the end, seeks (header walk, estimate,
- * sync-sample pre-roll, after the end), file faults and close, under the sanitizers.
- * Built and run by test/fuzz.sh.
+ * libFuzzer target: arbitrary bytes as the file FMOD hands the codec, after four control bytes (source
+ * quirks, seek targets, a mid-transfer file fault, the limits). Exercises the probe, the ADTS walk and
+ * resync, the MP4 box parser and sample tables, decoding through the drain to the end, seeks (header walk,
+ * estimate, sync-sample pre-roll, after the end), file faults and their retry, the concealment and resync
+ * limits, and close, under the sanitizers. Built and run by test/fuzz.sh (with a lowered resync limit).
  */
 #include <stdint.h>
 #include <stdlib.h>
@@ -29,24 +29,29 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
     fake_file               file;
     unsigned int            control;
     unsigned int            fault;
+    unsigned int            limits;
     unsigned int            frames = 0;
     int                     reads;
     int                     afterEnd = 0;
 
-    if (size < 3 || size > (1u << 22)) {
+    if (size < 4 || size > (1u << 22)) {
         return 0;
     }
-    /* The first three bytes steer the harness; the rest is the file. */
+    /* The first four bytes steer the harness; the rest is the file. */
     control = (unsigned int)data[0] | ((unsigned int)data[1] << 8);
     fault   = data[2];
-    fake_file_init(&file, data + 3, (unsigned int)(size - 3));
+    limits  = data[3];
+    fake_file_init(&file, data + 4, (unsigned int)(size - 4));
     file.sizeUnknown = (control & 1) != 0;
     file.maxChunk    = (control & 2) ? 1 + (control >> 8) : 0;
     if (fault) {
-        /* A file error from a steered offset on, like a source that fails mid-transfer. */
-        file.failAtPos = FMOD_ERR_FILE_BAD;
-        file.failPos   = (unsigned int)((unsigned long long)(size - 3) * fault / 256u);
+        /* A file error from a steered offset on, like a source that fails mid-transfer: once (retried) or
+           for good, a timeout (never retried) or another error. */
+        file.failAtPos = (limits & 2) ? FMOD_ERR_NET_SOCKET_ERROR : FMOD_ERR_FILE_BAD;
+        file.failPos   = (unsigned int)((unsigned long long)(size - 4) * fault / 256u);
+        file.failTimes = (limits & 4) ? 1 : 0;
     }
+    ampaac_conceal_limit_ms = (limits & 1) ? 20 : AMPAAC_CONCEAL_LIMIT_MS;
     /* Deterministic seek walks: none (the estimate path) or all the way to the target. */
     ampaac_hop_budget_ms = (control & 4) ? 0 : 0xFFFFFFFFu;
 

@@ -53,7 +53,9 @@ JOBS         ?= $(shell sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || ec
 SPIKE        ?=
 SAN          ?=
 # Any UBSan report fails the run; fdk's fixed-point code left-shifts negative values by design (shift-base).
-SAN_FLAGS     = -fsanitize=address,undefined -fno-sanitize=shift-base -fno-sanitize-recover=all -fno-omit-frame-pointer
+SAN_BASE      = -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+SAN_FLAGS     = $(SAN_BASE) -fsanitize=unsigned-integer-overflow   # ampaac's C: an unsigned wrap is a bug
+SAN_CXX_FLAGS = $(SAN_BASE) -fno-sanitize=shift-base               # fdk shifts negative values left by design
 FUZZ_SECONDS ?= 1800
 
 # Not exported: `cmake --build` treats any VERBOSE in the environment, even empty, as verbose.
@@ -143,7 +145,7 @@ test:
 	$(CMAKE) -S "$(FMOD_DIR)" -B "$(TEST_DIR)" -G "$(GENERATOR)"                          \
 		-DCMAKE_BUILD_TYPE=RelWithDebInfo -DAMPAAC_PLATFORM=OSX -DAMPAAC_TESTS=ON                    \
 		-DFMOD_API_INC:PATH="$(FMOD_API_INC)"                                               \
-		$(if $(SAN),"-DCMAKE_C_FLAGS=$(SAN_FLAGS)" "-DCMAKE_CXX_FLAGS=$(SAN_FLAGS)" \
+		$(if $(SAN),"-DCMAKE_C_FLAGS=$(SAN_FLAGS)" "-DCMAKE_CXX_FLAGS=$(SAN_CXX_FLAGS)" \
 		            "-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=address$(,)undefined")              \
 		> "$(TEST_DIR)/configure.log"
 	MAKEFLAGS= $(CMAKE) --build "$(TEST_DIR)" --target ampaac_test --parallel $(JOBS)
@@ -153,7 +155,7 @@ test:
 		arch -x86_64 "$(TEST_DIR)/ampaac_test" "$(FMOD_DIR)/test/fixtures"; \
 	fi
 
-linux-test:
+linux-test: linux
 	$(require-fmod)
 	ZIG="$(ZIG)" FMOD_API_INC="$(FMOD_API_INC)" LINUX_TEST_BUILD="$(BUILD_ROOT)/linux-x86_64-test" \
 		"$(FMOD_DIR)/test/linux.sh" "$(FMOD_LINUX_LIB)" "$(BUILD_ROOT)/linux-x86_64-$(BUILD_TYPE_LC)/libampaac.so"

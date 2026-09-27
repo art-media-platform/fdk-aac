@@ -75,9 +75,9 @@ def unprefixed(symbols):
 def common_checks(report, leg, artifact, undefined, args):
     data = artifact.read_bytes()
     stamps = {m.decode() for m in IDENT.findall(data)}
-    rev = args.head + ("-dirty" if args.dirty else "")
-    ok = stamps == {rev} and (args.allow_dirty or not rev.endswith("-dirty"))
-    report.check(leg, "revision", ok, f"stamp {', '.join(sorted(stamps)) or 'missing'}; fork HEAD {rev}")
+    # The build stamps "-dirty" when the compiled trees differ from HEAD; that stamp passes only when allowed.
+    ok = stamps == {args.head} or (args.allow_dirty and stamps == {args.head + "-dirty"})
+    report.check(leg, "revision", ok, f"stamp {', '.join(sorted(stamps)) or 'missing'}; fork HEAD {args.head}")
 
     leaks = [p for p in args.builder_paths + list(BUILDER_PREFIXES) if p.encode() in data]
     report.check(leg, "builder paths", not leaks, "none embedded" if not leaks else f"embedded: {', '.join(leaks)}")
@@ -222,7 +222,6 @@ def main():
 
     fork = fmod_dir.parent
     args.head = run("git", "-C", str(fork), "rev-parse", "--short", "HEAD").strip()
-    args.dirty = bool(run("git", "-C", str(fork), "status", "--porcelain", "--untracked-files=no").strip())
     args.builder_paths = sorted({str(Path.home()), str(fork), str(fork.resolve())})
     args.tool = lambda name: str(args.llvm_bin / name) if args.llvm_bin else name
 
@@ -243,12 +242,12 @@ def main():
         except (RuntimeError, AttributeError, FileNotFoundError) as err:
             report.check(leg, "tooling", False, str(err))
 
-    print(f"check_legs: {len(manifests)} legs, {report.checks} checks, {report.failed} failed")
     if args.require_all:
         built = {manifest.read_text().splitlines()[0].split("/")[0] for manifest in manifests}
         for leg in LEGS:
             if leg not in built:
                 report.check(leg, "built", False, f"no {args.build_type} build under {args.build_root}")
+    print(f"check_legs: {len(manifests)} legs, {report.checks} checks, {report.failed} failed")
     if not manifests or report.failed:
         sys.exit(1)
 

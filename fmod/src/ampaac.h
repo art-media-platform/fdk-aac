@@ -19,7 +19,9 @@
 #define AMPAAC_PREROLL_AUS   8         /* access units decoded and dropped ahead of a seek target (PS needs ~8) */
 #define AMPAAC_READ_THROUGH  262144u   /* forward jumps up to this far are read through, not seeked */
 #define AMPAAC_HOP_BUDGET_MS 100u      /* ADTS: time a seek may spend walking frame headers */
+#ifndef AMPAAC_RESYNC_LIMIT                /* the fuzz build lowers it, so small inputs reach it */
 #define AMPAAC_RESYNC_LIMIT  1048576u  /* ADTS: bytes one resync scans before the stream counts as ended */
+#endif
 #define AMPAAC_TRAILER_MAX   65536u    /* ADTS: bytes before the end a trailing tag (ID3v1, APE, Lyrics3) spans */
 #define AMPAAC_BOX_LIMIT     64u       /* MP4: top-level boxes walked looking for moov (files have a handful) */
 #define AMPAAC_STARTUP_DROP  8u        /* frames at another rate a restarted decoder may drop (SBR start-up) */
