@@ -80,7 +80,7 @@ def harness(args, scenario, name, seek_ms=None):
             continue
         for pair in line.split():
             key, _, value = pair.partition("=")
-            fields[key] = value
+            fields.setdefault(key, value)   # the first: the play loop repeats openstate and result
     if done.returncode != 0:
         errors.append(f"exit {done.returncode}: {done.stderr.strip()}")
     return fields, errors
