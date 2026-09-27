@@ -256,7 +256,8 @@ static FMOD_RESULT decode_next(FMOD_CODEC_STATE* state, ampaac_codec* aac) {
             if (aac->drainLeft == 0) {
                 if (aac->endPcm != AMPAAC_UNKNOWN && aac->decodedPcm < aac->endPcm) {
                     /* The data ended before the declared length (a body cut short, a failed decoder):
-                       silence to that length, or FMOD fills it by repeating its last buffered block. */
+                       silence to that length, rather than leave it to FMOD (what FMOD plays there is
+                       unmeasured). */
                     unsigned int pad = aac->endPcm - aac->decodedPcm;
                     frames = pad < (unsigned int)aac->frameSize ? pad : (unsigned int)aac->frameSize;
                     memset(aac->pcm, 0, (size_t)frames * (size_t)aac->channels * sizeof(INT_PCM));

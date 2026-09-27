@@ -32,30 +32,45 @@ codec's data ends sooner, cuts the tail when the data runs longer, and never ask
 - **Length:** M4A declares its exact length (for a truncated file, the length of the access units it
   holds). ADTS declares an unknown length, so FMOD ends the stream at
   the decoder's end of stream. The running estimate is published as the tag `AMPAAC_LENGTH_MS`
-  (`FMOD_TAGTYPE_USER`, 32-bit integer) and becomes exact at the end. With `FMOD_ACCURATETIME`, ADTS
-  reads the whole stream at open and declares its exact length.
-- **Seeking:** M4A seeks are sample-exact: decoding restarts 8 access units ahead of the target (from the
-  sync sample at or before that point when the track marks sync samples) and drops the pre-roll output.
-  ADTS seeks walk frame headers forward from the nearest known position, for up to 100 ms per seek; they
-  are exact wherever the walk reaches and estimated beyond it.
+  (`FMOD_TAGTYPE_USER`, 32-bit integer) and becomes exact at the end. It comes from the mean frame size so
+  far, so early in a VBR stream it can be far off: a 90 s speech file with a quiet opening estimated 126 s
+  at open and 92 s after 60 s of play. With `FMOD_ACCURATETIME`, ADTS reads the whole stream at open and
+  declares its exact length.
+- **Seeking:** M4A seeks are sample-exact: decoding restarts 8 access units ahead of the target (xHE-AAC:
+  from the sync sample at or before that point) and drops the pre-roll output. ADTS seeks walk frame
+  headers forward from the nearest known position, for up to 100 ms per seek; they are exact wherever the
+  walk reaches and estimated beyond it.
 - **Sample-rate changes** (implicit SBR found after open) arrive as FMOD's `Sample Rate Change` FLOAT tag.
-- **Netstreams:** every FMOD netstream seek is a new HTTP request, so forward jumps of up to 256 KiB are
-  read through instead of seeked. FMOD also reads the last ≤ 2 KiB of every file at open: its open waits
-  on that request (up to the network timeout) unless the server answers it, and a 503 there does no harm.
-  A seek whose request fails or outlives the network timeout leaves the channel stranded: FMOD reports it
-  playing at the target and never ends it, for FMOD's own codecs as for ampaac.
+- **Netstreams** (measured on FMOD 2.03.14 against a Range server):
+  - At open FMOD reads each file's tail: a Range from `floor((size − 128) / 2048) × 2048` to the end
+    (128–2,175 bytes; some sizes get a second, shorter one). The open waits on it, up to the network
+    timeout, unless the server answers it; a 503 there changes nothing.
+  - A seek outside FMOD's receive ring (twice the stream buffer) is a new Range request, from the target
+    rounded down to the ring size; within the ring, none. ampaac reads through forward jumps of up to
+    256 KiB rather than seeking.
+  - A seek whose request fails or outlives the network timeout leaves the channel stranded: it reads as
+    playing at the target and never ends, and `Sound::getOpenState` returns the error (24 after a 503, 43
+    after the timeout). FMOD's own codecs behave the same; its MP3 codec sends the failed request once more
+    first.
+  - A body that stalls past the network timeout: `getOpenState` returns 43 from then on. FMOD's MP3 codec
+    stops the channel; an ampaac stream plays on from stale bytes (below), and its open state reads ERROR
+    for only a few milliseconds, so check the result `getOpenState` returns, not only the state.
 - **A body cut short:** when an HTTP body ends before its Content-Length, FMOD neither fails nor
   reconnects, and reads keep succeeding up to that length, so the codec cannot see the cut. Once FMOD's
-  receive ring (twice the stream buffer size) has wrapped, the missing bytes are its stale contents,
-  cycling; before that, zeros or an early end of file. ADTS frames in stale bytes are valid, so the missing
-  span replays audio from one ring earlier, as it does with FMOD's own MP3 codec. M4A access units read
-  from stale bytes fail to decode, and fdk's concealment holds the output near silence (under −66 dBFS) to
-  the declared end. When an M4A's data ends before its declared length, ampaac plays silence to that
-  length, so FMOD never fills it by repeating its last block. A server must never cut a body.
+  receive ring has wrapped, the missing bytes are its stale contents, cycling; before that, zeros or an
+  early end of file. FMOD's MP3 and WAV codecs and ampaac's ADTS decode the stale bytes as audio, so the
+  missing span loops the ring's audio to the declared end (measured at 16 and 128 KiB stream buffers).
+  M4A access units read from stale bytes fail to decode, and fdk's concealment holds the output near
+  silence (under −66 dBFS) to the declared end. A server must never cut a body.
+- **An M4A's data ending before its declared length** (a failed decoder, a cut before the ring wraps):
+  ampaac plays silence to that length. What FMOD itself plays past a codec's early end is unmeasured.
 - **Errors:** open returns `FMOD_ERR_FORMAT` for data that is not AAC, and for a file error before the data
-  shows `ftyp` or an ADTS frame chain, so FMOD's own codecs still get their turn (an MP3's ID3v2 skip is a
-  hard seek). After that, file and network errors pass through unchanged. A stream ends after 10 s of
-  unbroken concealment, or when a resync finds no frame in 1 MiB.
+  shows `ftyp` or an ADTS frame chain: FMOD's codec API treats `FMOD_ERR_FORMAT` as "not this format" and
+  tries its next codec (an MP3's ID3v2 skip is a hard seek); what FMOD does with any other error from a
+  probe is unmeasured. After that, file and network errors pass through unchanged. A stream ends, as a
+  normal end of file, after 10 s of unbroken concealment (a stream yielding nothing else that long is not
+  recovering; logged in FMOD's debug log) or when a resync finds no frame in 1 MiB (over a hundred
+  maximum-size ADTS frames; not logged).
 - **Memory:** the codec's state and tables come from FMOD's allocator; fdk's decoder calls `calloc`.
 - **Stack:** a decode peaks near 50 KB of stack (`make test` measures it: 49,736 bytes on arm64, 49,800 on
   x86_64; fdk's frame decoder alone takes 35.9 KB). FMOD's default STREAM (96 KiB) and NONBLOCKING
@@ -136,8 +151,9 @@ Windows DLL), exports, stack protection, embedded paths, and a revision stamp eq
 - `make linux-test` — the host tests on x86_64 Linux, then FMOD's own Linux library playing every fixture
   as an HTTP netstream (`test/serve_range.py`), with seeks and a WAV control, in an amd64 container.
 - `make fuzz` (`test/fuzz.sh`, `FUZZ_SECONDS`) — libFuzzer + ASan + UBSan in a Linux container. Inputs are
-  capped at the largest seed (about 24 KB), so large-file paths need their own tests.
-- `test/fmod_harness.c` — drives a real FMOD library with the codec registered (open, play, seek, length).
+  capped at 256 KiB (`-max_len`), so larger-file paths need their own tests.
+- `test/fmod_harness.c` — drives a real FMOD library with the codec registered: open, play, seek, length,
+  pause, and a System release during an open or a seek; its header lists the settings.
 - `test/make_fixtures.py` — regenerates `test/fixtures/` (macOS `afconvert`).
 
 ## Licensing
