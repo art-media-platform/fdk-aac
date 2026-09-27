@@ -484,6 +484,17 @@ FMOD_RESULT ampaac_mp4_open(ampaac_codec* aac) {
     return FMOD_OK;
 }
 
+/* value * rate / timescale, saturating: a 64-bit edit or iTunSMPB field can exceed what the product holds, and
+   the clamps in ampaac_mp4_set_trim then treat the value as absent. */
+static unsigned long long scale_samples(unsigned long long value, unsigned int rate, unsigned int timescale) {
+    unsigned long long whole = value / timescale;
+
+    if (rate != 0 && whole >= ~0ULL / rate) {
+        return ~0ULL;
+    }
+    return whole * rate + value % timescale * rate / timescale;
+}
+
 /* Trim (priming and presented length) in output samples, once the output rate and frame size are known. */
 void ampaac_mp4_set_trim(ampaac_codec* aac) {
     ampaac_mp4*        mp4 = &aac->mp4;
@@ -494,11 +505,11 @@ void ampaac_mp4_set_trim(ampaac_codec* aac) {
     unsigned int       delay = aac->decoderDelay;   /* the drain restores these at the end */
 
     if (mp4->hasEdit && mp4->movieTimescale) {
-        lead   = mp4->editMediaTime * rate / mp4->timescale;
-        length = mp4->editDuration * rate / mp4->movieTimescale;
+        lead   = scale_samples(mp4->editMediaTime, rate, mp4->timescale);
+        length = scale_samples(mp4->editDuration, rate, mp4->movieTimescale);
     } else if (mp4->hasSmpb) {
-        lead   = mp4->smpbPriming * rate / mp4->timescale;
-        length = mp4->smpbSamples * rate / mp4->timescale;
+        lead   = scale_samples(mp4->smpbPriming, rate, mp4->timescale);
+        length = scale_samples(mp4->smpbSamples, rate, mp4->timescale);
     }
     if (lead > total || lead + delay >= AMPAAC_UNKNOWN) {
         lead = 0;

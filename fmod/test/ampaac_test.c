@@ -1310,6 +1310,18 @@ static void test_length_estimate(void) {
     CHECK(fake_live_allocations() == 0, "length estimate: %ld allocations leaked", fake_live_allocations());
 }
 
+/* Finds `len` bytes of `needle` in data, or NULL. */
+static unsigned char* find_bytes(unsigned char* data, unsigned int size, const char* needle, unsigned int len) {
+    unsigned int i;
+
+    for (i = 0; i + len <= size; i++) {
+        if (memcmp(data + i, needle, len) == 0) {
+            return data + i;
+        }
+    }
+    return NULL;
+}
+
 /* Audit round 3 (2026-09-27): a transport fault inside the open walk, the seek walk's byte cap, a rate change inside
    a short ADTS, a 64-bit M4A trim field, the reader across a 4 GiB wrap, ACCURATETIME without a size, and a fault
    inside an ID3v2 tag. */
@@ -1400,6 +1412,37 @@ static void test_audit_round3(void) {
         free(data);
         free(he.data);
         free(lc.data);
+    }
+
+    /* A 64-bit iTunSMPB sample count past UINT64_MAX / rate reads as absent (the length the file declares with a
+       zero count), not as a product that wrapped to a few samples. */
+    {
+        blob           m4a = load("m4a_lc_44k_stereo.m4a");
+        unsigned char* field = find_bytes(m4a.data, m4a.size, "00000000000204CC", 16);
+
+        CHECK(field != NULL, "m4a_lc_44k_stereo.m4a: iTunSMPB sample count not found");
+        if (field) {
+            unsigned int origin = AMPAAC_UNKNOWN;
+            unsigned int absurd = 0;
+
+            fake_file_init(&file, m4a.data, m4a.size);
+            if (open_file(&file, 0) == FMOD_OK) {
+                origin = file.state.waveformat->lengthpcm;
+                close_file(&file);
+            }
+            memcpy(field, "00017C6F8C751F1B", 16);   /* ceil(2^64 / 44100) + 3 */
+            fake_file_init(&file, m4a.data, m4a.size);
+            if (open_file(&file, 0) == FMOD_OK) {
+                absurd = file.state.waveformat->lengthpcm;
+                close_file(&file);
+            }
+            /* Read as absent, the count leaves the priming trim and plays the decoded tail (under 2 frames of
+               padding); wrapped, it declared 3 samples. */
+            CHECK(origin == 132300 && absurd >= origin && absurd <= origin + 2048,
+                  "iTunSMPB count past 2^64 / rate: declared %u, want %u..%u (read as absent, not wrapped)", absurd,
+                  origin, origin + 2048);
+        }
+        free(m4a.data);
     }
 
     CHECK(fake_live_allocations() == 0, "audit round 3: %ld allocations leaked", fake_live_allocations());
