@@ -295,8 +295,10 @@ static void hop_toward(ampaac_codec* aac, unsigned int target, unsigned int budg
             break;
         }
         if (!ampaac_adts_parse(p, avail, &hdr)) {
-            if (resync(aac, 1) == FMOD_ERR_FILE_EOF && aac->reader.fault == FMOD_OK) {
-                /* No frame follows the last one walked (a trailing tag): that frame ends the stream. */
+            /* Near the end, no frame following the last one walked means a trailing tag: that frame ends
+               the stream. Farther in, the walk stops without scanning: a seek must not search a megabyte. */
+            if (rd->size != AMPAAC_UNKNOWN && rd->size - rd->pos <= AMPAAC_TRAILER_MAX
+                && resync(aac, 1) == FMOD_ERR_FILE_EOF && aac->reader.fault == FMOD_OK) {
                 aac->lengthPcm   = at.pcm;
                 aac->lengthExact = 1;
             }
@@ -366,7 +368,12 @@ FMOD_RESULT ampaac_adts_seek(ampaac_codec* aac, unsigned int targetPcm) {
     const ampaac_index_entry* last;
     FMOD_RESULT               res;
 
-    if (start >= last_anchor(aac)->pcm + aac->pcmPerFrame) {
+    last = last_anchor(aac);
+    if (start >= last->pcm + aac->pcmPerFrame
+        && (unsigned long long)(start - last->pcm) / aac->pcmPerFrame * mean_frame_bytes(aac) <= AMPAAC_READ_THROUGH) {
+        /* The walk covers only bytes a netstream likely holds already (FMOD's ring is 256 KiB at AMP's stream
+           buffer): one of its reads waits for bytes still arriving, which the time budget cannot cut short.
+           A farther target is estimated at once, so its Range is the first request the server sees. */
         hop_toward(aac, start, ampaac_hop_budget_ms);
     }
     last = last_anchor(aac);
@@ -393,7 +400,8 @@ FMOD_RESULT ampaac_adts_seek(ampaac_codec* aac, unsigned int targetPcm) {
         return FMOD_OK;
     }
 
-    /* Past the walk budget: land by the mean frame size from the furthest exact anchor, then resync. */
+    /* Past the walk (its budget, or a target beyond its reach): land by the mean frame size from the furthest
+       exact anchor, then resync. */
     {
         unsigned int       mean = mean_frame_bytes(aac);
         unsigned long long frames = (start - last->pcm) / aac->pcmPerFrame;

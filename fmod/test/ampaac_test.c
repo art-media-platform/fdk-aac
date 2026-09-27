@@ -888,6 +888,17 @@ static void zero_adts_payloads(unsigned char* data, unsigned int size, unsigned 
     }
 }
 
+static double max_diff(const short* a, const short* b, size_t samples) {
+    double diff = 0;
+    size_t i;
+
+    for (i = 0; i < samples; i++) {
+        double d = fabs((double)a[i] - b[i]);
+        diff = d > diff ? d : diff;
+    }
+    return diff;
+}
+
 /* Reads `frames` frames at the current position into pcm (channels interleaved); returns the count read. */
 static unsigned int read_frames(fake_file* file, short* pcm, unsigned int frames) {
     unsigned int total = 0;
@@ -1057,6 +1068,60 @@ static void test_limits(void) {
     CHECK(fake_live_allocations() == 0, "limits: %ld allocations leaked", fake_live_allocations());
 }
 
+/* ADTS seeks: a target within 256 KiB of the last known frame is walked to and lands exactly; a farther one
+   is estimated at once, without reading the bytes between (a netstream would wait on each). */
+static void test_far_seek(void) {
+    blob           src = load("adts_lc_44k_stereo.aac");
+    unsigned int   size;
+    unsigned char* data = repeat_blob(&src, 40, &size);   /* 120 s, 6.9 KB/s: 256 KiB is 38 s of it */
+    decoded        whole;
+    fake_file      file;
+    FMOD_RESULT    res;
+    short          pcm[4096 * 2];
+
+    printf("far seek\n");
+    res = decode_blob(data, size, 4096, &whole);
+    CHECK(res == FMOD_OK && whole.frames > 119 * 44100, "120 s ADTS: %d, %u frames", res, whole.frames);
+
+    fake_file_init(&file, data, size);
+    if (res == FMOD_OK && open_file(&file, 0) == FMOD_OK) {
+        unsigned int reads;
+        unsigned int seeks;
+        unsigned int got;
+        unsigned int near = 12 * 44100;   /* ~80 KB ahead */
+        unsigned int far = 100 * 44100;   /* ~610 KB past the 12 s the near seek walked to */
+        decoded      one;
+
+        read_frames(&file, pcm, 4096);
+        res = codec()->setposition(&file.state, 0, near, FMOD_TIMEUNIT_PCM);
+        got = read_frames(&file, pcm, 4096);
+        CHECK(res == FMOD_OK && got == 4096 && max_diff(pcm, whole.pcm + (size_t)near * 2, (size_t)got * 2) <= 1,
+              "near seek to 12 s: %d, %u frames, max |diff| %.0f", res, got,
+              got ? max_diff(pcm, whole.pcm + (size_t)near * 2, (size_t)got * 2) : -1.0);
+
+        reads = file.reads;
+        seeks = file.seeks;
+        res   = codec()->setposition(&file.state, 0, far, FMOD_TIMEUNIT_PCM);
+        CHECK(res == FMOD_OK && file.reads - reads <= 8 && file.seeks > seeks,
+              "far seek to 100 s: %d after %u reads and %u source seeks, want the bytes between skipped", res,
+              file.reads - reads, file.seeks - seeks);
+        got = read_frames(&file, pcm, 4096);
+        memset(&one, 0, sizeof(one));
+        one.pcm      = pcm;
+        one.channels = 2;
+        one.frames   = got;
+        CHECK(got == 4096 && channel_rms(&one, 0, 0, got) > 1000, "far seek to 100 s: %u frames, rms %.1f", got,
+              got ? channel_rms(&one, 0, 0, got) : 0.0);
+        close_file(&file);
+    }
+    if (whole.pcm) {
+        free(whole.pcm);
+    }
+    free(data);
+    free(src.data);
+    CHECK(fake_live_allocations() == 0, "far seek: %ld allocations leaked", fake_live_allocations());
+}
+
 int main(int argc, char** argv) {
     unsigned int i;
 
@@ -1076,6 +1141,7 @@ int main(int argc, char** argv) {
     test_long_adts();
     test_retry();
     test_limits();
+    test_far_seek();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

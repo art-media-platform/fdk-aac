@@ -37,9 +37,12 @@ codec's data ends sooner, cuts the tail when the data runs longer, and never ask
   at open and 92 s after 60 s of play. With `FMOD_ACCURATETIME`, ADTS reads the whole stream at open and
   declares its exact length.
 - **Seeking:** M4A seeks are sample-exact: decoding restarts 8 access units ahead of the target (xHE-AAC:
-  from the sync sample at or before that point) and drops the pre-roll output. ADTS seeks walk frame
-  headers forward from the nearest known position, for up to 100 ms per seek; they are exact wherever the
-  walk reaches and estimated beyond it.
+  from the sync sample at or before that point) and drops the pre-roll output. An ADTS seek to within
+  256 KiB of the nearest known frame walks frame headers forward, for up to 100 ms, and lands exactly
+  wherever the walk reaches. A farther target, or one past the budget, is estimated from the mean frame size
+  (close for CBR, approximate for VBR), so a netstream's first request after the seek is for the target's
+  bytes: a walk's read on a still-arriving stream would wait for them, and its budget cannot cut a read
+  short. `FMOD_ACCURATETIME` indexes the whole stream at open, so every seek lands exactly.
 - **Sample-rate changes** (implicit SBR found after open) arrive as FMOD's `Sample Rate Change` FLOAT tag.
 - **Netstreams** (measured on FMOD 2.03.14 against a Range server):
   - At open FMOD reads each file's tail: a Range from `floor((size − 128) / 2048) × 2048` to the end
