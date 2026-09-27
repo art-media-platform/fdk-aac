@@ -674,6 +674,8 @@ static void expect_format_error(const char* what, const unsigned char* data, uns
     CHECK(fake_live_allocations() == 0, "%s: %ld allocations leaked", what, fake_live_allocations());
 }
 
+static unsigned char* repeat_blob(const blob* src, unsigned int copies, unsigned int* size);
+
 static void test_rejects(void) {
     static unsigned char buf[65536];
     unsigned int         n;
@@ -814,13 +816,16 @@ static void test_rejects(void) {
         free(m4a.data);
     }
 
-    /* Mid-stream, reads return the error after the frames before it, not an end of stream. */
+    /* Mid-stream, reads return the error after the frames before it, not an end of stream. The fault sits past the
+       open's 128 KiB header walk, which would otherwise meet it and end the open. */
     {
-        blob    adts = load("adts_lc_44k_stereo.aac");
-        decoded out;
-        fake_file_init(&file, adts.data, adts.size);
+        blob           adts = load("adts_lc_44k_stereo.aac");
+        unsigned int   size;
+        unsigned char* data = repeat_blob(&adts, 10, &size);   /* 206,920 B */
+        decoded        out;
+        fake_file_init(&file, data, size);
         file.failAtPos = FMOD_ERR_NET_SOCKET_ERROR;
-        file.failPos   = adts.size / 2;
+        file.failPos   = 160 * 1024;
         res = open_file(&file, 0);
         CHECK(res == FMOD_OK, "mid-stream fault: open %d", res);
         if (res == FMOD_OK) {
@@ -831,6 +836,7 @@ static void test_rejects(void) {
             close_file(&file);
         }
         CHECK(fake_live_allocations() == 0, "mid-stream fault: %ld allocations leaked", fake_live_allocations());
+        free(data);
         free(adts.data);
     }
 }
@@ -992,16 +998,21 @@ static void test_retry(void) {
 
     printf("retry\n");
     for (i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-        blob    src = load(names[i]);
-        decoded clean;
-        decoded faulted;
+        blob           src = load(names[i]);
+        int            adts = i == 0;
+        unsigned int   size = src.size;
+        /* An ADTS open walks its first 128 KiB of frame headers: ten copies put the fault past that walk, in playback. */
+        unsigned char* data = adts ? repeat_blob(&src, 10, &size) : src.data;
+        unsigned int   failPos = adts ? 160 * 1024 : src.size / 2;
+        decoded        clean;
+        decoded        faulted;
 
-        res = decode_blob(src.data, src.size, 4096, &clean);
+        res = decode_blob(data, size, 4096, &clean);
         CHECK(res == FMOD_OK, "%s: clean decode %d", names[i], res);
 
-        fake_file_init(&file, src.data, src.size);
+        fake_file_init(&file, data, size);
         file.failAtPos = FMOD_ERR_HTTP_SERVER_ERROR;
-        file.failPos   = src.size / 2;
+        file.failPos   = failPos;
         file.failTimes = 1;
         res = open_file(&file, 0);
         CHECK(res == FMOD_OK, "%s: transient fault open %d", names[i], res);
@@ -1015,11 +1026,12 @@ static void test_retry(void) {
             close_file(&file);
         }
 
-        fake_file_init(&file, src.data, src.size);
+        fake_file_init(&file, data, size);
         file.failAtPos = FMOD_ERR_NET_SOCKET_ERROR;
-        file.failPos   = src.size / 2;
+        file.failPos   = failPos;
         file.failTimes = 1;
         res = open_file(&file, 0);
+        CHECK(res == FMOD_OK, "%s: timeout case open %d", names[i], res);
         if (res == FMOD_OK) {
             res = read_all(&file, 4096, &faulted);
             CHECK(res == FMOD_ERR_NET_SOCKET_ERROR, "%s: a timeout retried: %d, want FMOD_ERR_NET_SOCKET_ERROR", names[i], res);
@@ -1027,6 +1039,9 @@ static void test_retry(void) {
             close_file(&file);
         }
         free(clean.pcm);
+        if (adts) {
+            free(data);
+        }
         free(src.data);
     }
 
@@ -1295,6 +1310,39 @@ static void test_length_estimate(void) {
     CHECK(fake_live_allocations() == 0, "length estimate: %ld allocations leaked", fake_live_allocations());
 }
 
+/* Audit round 3 (2026-09-27): a transport fault inside the open walk, the seek walk's byte cap, a rate change inside
+   a short ADTS, a 64-bit M4A trim field, the reader across a 4 GiB wrap, ACCURATETIME without a size, and a fault
+   inside an ID3v2 tag. */
+static void test_audit_round3(void) {
+    fake_file   file;
+    FMOD_RESULT res;
+
+    printf("audit round 3\n");
+
+    /* A transport fault inside the open's header walk ends the open as it is. The walk passes the reader's 16 KiB
+       window, so the rewind after it reaches FMOD, and must not erase the fault. */
+    {
+        blob           adts = load("adts_lc_44k_stereo.aac");
+        unsigned int   size;
+        unsigned char* data = repeat_blob(&adts, 2, &size);   /* 41,384 B */
+
+        fake_file_init(&file, data, size);
+        file.failAtPos = FMOD_ERR_NET_SOCKET_ERROR;
+        file.failPos   = 20480;
+        file.failTimes = 1;
+        res = open_file(&file, 0);
+        CHECK(res == FMOD_ERR_NET_SOCKET_ERROR, "socket error inside the open walk: open %d, want FMOD_ERR_NET_SOCKET_ERROR",
+              res);
+        if (res == FMOD_OK) {
+            close_file(&file);
+        }
+        free(data);
+        free(adts.data);
+    }
+
+    CHECK(fake_live_allocations() == 0, "audit round 3: %ld allocations leaked", fake_live_allocations());
+}
+
 /* A decode loop that never ends must fail the run, not hang it. */
 static void on_watchdog(int sig) {
     static const char msg[] = "  FAIL watchdog: the tests ran past 600 s (a loop that does not end)\n";
@@ -1330,6 +1378,7 @@ int main(int argc, char** argv) {
     test_rate_restart();
     test_far_seek();
     test_length_estimate();
+    test_audit_round3();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
