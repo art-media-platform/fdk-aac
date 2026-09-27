@@ -578,7 +578,7 @@ static FMOD_RESULT F_CALL codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode
         ampaac_mp4_set_trim(aac);
     } else {
         ampaac_adts_reset_index(aac);
-        if (usermode & FMOD_ACCURATETIME) {
+        if ((usermode & FMOD_ACCURATETIME) && aac->reader.size != AMPAAC_UNKNOWN) {
             ampaac_adts_walk_to_end(aac);   /* reads the whole stream: exact length and a full seek index */
         } else {
             ampaac_adts_walk_open(aac);

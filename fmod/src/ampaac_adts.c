@@ -311,6 +311,9 @@ static void hop_toward(ampaac_codec* aac, unsigned int target, unsigned int budg
             break;   /* another rate or profile: its frames hold another PCM count (a channel change keeps it) */
         }
         framePcm = (unsigned int)aac->frameSize * hdr.rawBlocks;
+        if ((unsigned long long)at.pcm + framePcm >= AMPAAC_UNKNOWN) {
+            break;   /* past FMOD's 32-bit PCM positions: no exact length */
+        }
         if (at.pcm + framePcm > target) {
             break;
         }

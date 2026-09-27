@@ -1485,6 +1485,23 @@ static void test_audit_round3(void) {
               wrong ? "wrong bytes" : "bytes in order", off, file.seeks, file.reads, rd.fault);
     }
 
+    /* FMOD_ACCURATETIME on a stream without a size does not walk it (a live stream never ends): the length stays
+       unknown. */
+    {
+        blob adts = load("adts_lc_44k_stereo.aac");
+
+        fake_file_init(&file, adts.data, adts.size);
+        file.sizeUnknown = 1;
+        res = open_file(&file, FMOD_ACCURATETIME);
+        CHECK(res == FMOD_OK && file.state.waveformat->lengthpcm == AMPAAC_UNKNOWN,
+              "ACCURATETIME without a size: %d, declared %u, want unknown", res,
+              res == FMOD_OK ? file.state.waveformat->lengthpcm : 0);
+        if (res == FMOD_OK) {
+            close_file(&file);
+        }
+        free(adts.data);
+    }
+
     CHECK(fake_live_allocations() == 0, "audit round 3: %ld allocations leaked", fake_live_allocations());
 }
 
