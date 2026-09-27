@@ -228,4 +228,11 @@ if(AMPAAC_TESTS AND AMPAAC_PLATFORM MATCHES "^(OSX|LINUX)$")
     add_executable(fmod_harness test/fmod_harness.c)
     target_include_directories(fmod_harness PRIVATE "${FMOD_API_INC}")
     target_link_libraries(fmod_harness PRIVATE ${CMAKE_DL_LIBS})
+
+    # test/linux.sh runs these in amd64 containers, where Rosetta's loader rejects an executable whose last LOAD
+    # segment holds no file bytes ("bss_size overflow"); without RELRO, .data and .bss share one segment.
+    if(AMPAAC_PLATFORM STREQUAL "LINUX")
+        target_link_options(ampaac_test PRIVATE -Wl,-z,norelro)
+        target_link_options(fmod_harness PRIVATE -Wl,-z,norelro)
+    endif()
 endif()

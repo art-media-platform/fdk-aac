@@ -4,8 +4,9 @@
 # Usage:
 #   make osx | ios | android | windows | linux   build one platform
 #   make all                                     every platform
-#   make test                                    host tests (macOS); SAN=1 adds ASan + UBSan
+#   make test                                    host tests (macOS, both slices under Rosetta); SAN=1 adds ASan + UBSan
 #   make check                                   check every built library against its platform contract
+#   make linux-test                              Linux leg in an amd64 container with FMOD's own Linux library
 #   make install                                 copy every built library into the Unity libs tree
 #   make clean | help
 #
@@ -14,7 +15,8 @@
 #
 # Overrides:
 #   BUILD_TYPE=Release|Debug   BUILD_ROOT=<dir>   UNITY_LIBS=<dir>   CMAKE=<cmake>   GENERATOR=<gen>
-#   LLVM_MINGW_ROOT=<llvm-mingw>   ZIG=<zig>   VERBOSE=1   SPIKE=1 (callback traces, AMPAAC_LENGTH_SCALE)
+#   LLVM_MINGW_ROOT=<llvm-mingw>   ZIG=<zig>   FMOD_LINUX_LIB=<libfmodstudio.so>   VERBOSE=1
+#   SPIKE=1 (callback traces, AMPAAC_LENGTH_SCALE)
 #
 # A build never writes into the Unity tree. `make install` does, temp + rename, so an editor holding the
 # old library keeps its mapped inode; Unity loads a new native plugin only after an editor restart.
@@ -33,6 +35,7 @@ UNITY_PROJ   ?= $(WORKSPACE)/amp.3D.unity
 UNITY_LIBS   ?= $(UNITY_PROJ)/Assets/art.media.platform/libs
 BUILD_ROOT   ?= $(FMOD_DIR)/build
 FMOD_API_INC ?=
+FMOD_LINUX_LIB ?= $(UNITY_PROJ)/Assets/Plugins/FMOD/platforms/linux/lib/x86_64/libfmodstudio.so
 
 unity-engine-path = $(shell python3 "$(UNITY_PROJ)/cmd/tools.py" --project-path "$(UNITY_PROJ)" --get-engine-path)
 ANDROID_NDK       = $(unity-engine-path)/PlaybackEngines/AndroidPlayer/NDK
@@ -80,7 +83,7 @@ define cmake-build
 	echo "ampaac: $(1) built -> $$(sed -n 2p "$(BUILD_DIR)/artifact.txt")"
 endef
 
-.PHONY: help all osx ios android windows windows-build linux linux-build test check install clean
+.PHONY: help all osx ios android windows windows-build linux linux-build test check linux-test install clean
 
 help:
 	@echo "ampaac — make targets"
@@ -90,6 +93,7 @@ help:
 	@echo "  make osx | ios | android | windows | linux | all"
 	@echo "  make test      host tests (SAN=1 for ASan + UBSan)"
 	@echo "  make check     check built libraries: arch, OS floor, deps, exports, hardening, revision stamp"
+	@echo "  make linux-test  Linux leg: host tests + FMOD's libfmodstudio.so in an amd64 container (docker)"
 	@echo "  make install   copy built libraries into UNITY_LIBS (temp + rename)"
 	@echo "  make clean     remove BUILD_ROOT (also after a Unity editor upgrade)"
 
@@ -142,6 +146,14 @@ test:
 		> "$(TEST_DIR)/configure.log"
 	MAKEFLAGS= $(CMAKE) --build "$(TEST_DIR)" --target ampaac_test --parallel $(JOBS)
 	"$(TEST_DIR)/ampaac_test" "$(FMOD_DIR)/test/fixtures"
+	if [ -z "$(SAN)" ] && [ "$$(uname -m)" = arm64 ] && arch -x86_64 /usr/bin/true 2>/dev/null; then \
+		echo "ampaac_test: x86_64 slice (Rosetta)"; \
+		arch -x86_64 "$(TEST_DIR)/ampaac_test" "$(FMOD_DIR)/test/fixtures"; \
+	fi
+
+linux-test:
+	$(require-fmod)
+	ZIG="$(ZIG)" FMOD_API_INC="$(FMOD_API_INC)" "$(FMOD_DIR)/test/linux.sh" "$(FMOD_LINUX_LIB)"
 
 # Checks every built library against its platform contract (ELF and PE legs use llvm-mingw's LLVM tools).
 check:
