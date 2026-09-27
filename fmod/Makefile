@@ -127,7 +127,7 @@ test:
 	$(eval TEST_DIR := $(BUILD_ROOT)/osx-test$(if $(SAN),-san))
 	mkdir -p "$(TEST_DIR)"
 	$(CMAKE) -S "$(FMOD_DIR)" -B "$(TEST_DIR)" -G "$(GENERATOR)"                          \
-		-DCMAKE_BUILD_TYPE=Debug -DAMPAAC_PLATFORM=OSX -DAMPAAC_TESTS=ON                    \
+		-DCMAKE_BUILD_TYPE=RelWithDebInfo -DAMPAAC_PLATFORM=OSX -DAMPAAC_TESTS=ON                    \
 		-DFMOD_API_INC:PATH="$(FMOD_API_INC)"                                               \
 		$(if $(SAN),"-DCMAKE_C_FLAGS=-fsanitize=address$(,)undefined -fno-omit-frame-pointer" \
 		            "-DCMAKE_CXX_FLAGS=-fsanitize=address$(,)undefined -fno-omit-frame-pointer" \

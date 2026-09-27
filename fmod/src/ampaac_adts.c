@@ -322,20 +322,22 @@ static unsigned int mean_frame_bytes(const ampaac_codec* aac) {
 
 void ampaac_adts_estimate_length(ampaac_codec* aac) {
     unsigned int              size = aac->reader.size;
-    unsigned int              mean = mean_frame_bytes(aac);
-    const ampaac_index_entry* last = last_anchor(aac);
+    unsigned int              mean;
+    const ampaac_index_entry* last;
     unsigned long long        pcm;
 
-    if (aac->lengthExact) {
+    if (aac->lengthExact || aac->indexLen == 0) {
         return;
     }
+    mean = mean_frame_bytes(aac);
+    last = last_anchor(aac);
     if (size == AMPAAC_UNKNOWN || mean == 0 || aac->pcmPerFrame == 0 || size <= last->offset) {
         aac->lengthPcm = size == AMPAAC_UNKNOWN ? AMPAAC_UNKNOWN : last->pcm;
         return;
     }
     pcm = last->pcm + ((unsigned long long)(size - last->offset) + mean / 2) / mean * aac->pcmPerFrame;
-    if (pcm < aac->decodedPcm) {
-        pcm = aac->decodedPcm;
+    if (pcm + aac->leadPcm < aac->decodedPcm) {
+        pcm = aac->decodedPcm - aac->leadPcm;
     }
     aac->lengthPcm = pcm >= AMPAAC_UNKNOWN ? AMPAAC_UNKNOWN - 1 : (unsigned int)pcm;
 }

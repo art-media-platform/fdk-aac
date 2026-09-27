@@ -132,7 +132,8 @@ endif()
 set(AMPAAC_SOURCES
     src/ampaac_codec.c
     src/ampaac_io.c
-    src/ampaac_adts.c)
+    src/ampaac_adts.c
+    src/ampaac_mp4.c)
 
 function(ampaac_configure target)
     target_include_directories(${target} PRIVATE
@@ -143,7 +144,7 @@ function(ampaac_configure target)
     target_compile_definitions(${target} PRIVATE AMPAAC_SOURCE_REV="${AMPAAC_SOURCE_REV}"
         $<$<BOOL:${AMPAAC_SPIKE}>:AMPAAC_SPIKE>)
     if(NOT MSVC)
-        target_compile_options(${target} PRIVATE -Wall -Wextra -Wno-unused-parameter -ffunction-sections -fdata-sections)
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wno-unused-parameter -Wno-unused-function -ffunction-sections -fdata-sections)
     endif()
 endfunction()
 

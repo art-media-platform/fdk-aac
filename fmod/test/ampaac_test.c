@@ -45,13 +45,20 @@ typedef struct fixture {
     const char* name;
     int         rate;
     int         channels;
+    int         mp4;       /* M4A: exact length, priming trimmed to the source's first sample */
+    int         moovEnd;   /* moov follows mdat: cutting the file's end cuts moov */
 } fixture;
 
 static const fixture fixtures[] = {
-    { "adts_lc_44k_stereo.aac",   44100, 2 },
-    { "adts_lc_22k_mono.aac",     22050, 1 },
-    { "adts_he_48k_stereo.aac",   48000, 2 },
-    { "adts_hev2_48k_stereo.aac", 48000, 2 },
+    { "adts_lc_44k_stereo.aac",   44100, 2, 0, 0 },
+    { "adts_lc_22k_mono.aac",     22050, 1, 0, 0 },
+    { "adts_he_48k_stereo.aac",   48000, 2, 0, 0 },
+    { "adts_hev2_48k_stereo.aac", 48000, 2, 0, 0 },
+    { "m4a_lc_44k_stereo.m4a",    44100, 2, 1, 0 },
+    { "m4a_he_48k_stereo.m4a",    48000, 2, 1, 0 },
+    { "m4a_hev2_48k_stereo.m4a",  48000, 2, 1, 0 },
+    { "m4a_lc_44k_moovend.m4a",   44100, 2, 1, 1 },   /* moov after mdat */
+    { "m4a_lc_44k_elst.m4a",      44100, 2, 1, 0 },   /* gapless from elst, no iTunSMPB */
 };
 
 static const char* fixtureDir;
@@ -197,16 +204,36 @@ static double seek_divergence(const decoded* whole, const decoded* tail, unsigne
     return worst;
 }
 
-/* Opens, optionally decodes everything first, seeks to target and decodes to EOF. */
-static FMOD_RESULT seek_and_decode(const blob* src, int decodeFirst, unsigned int target, decoded* tail, fake_file* file) {
+typedef enum seek_setup {
+    SEEK_FRESH   = 0,   /* before anything decoded: the header walk */
+    SEEK_PLAYING = 1,   /* after decoding past the target, not to EOF: a warm decoder */
+    SEEK_AFTER_EOF = 2  /* after the drain: the decoder is re-primed */
+} seek_setup;
+
+/* Opens, decodes per `setup`, seeks to target and decodes to EOF. */
+static FMOD_RESULT seek_and_decode(const blob* src, seek_setup setup, unsigned int target, decoded* tail, fake_file* file) {
     FMOD_RESULT res;
 
     fake_file_init(file, src->data, src->size);
-    open_file(file, 0);
+    res = open_file(file, 0);
+    if (res != FMOD_OK) {
+        memset(tail, 0, sizeof(*tail));
+        return res;
+    }
     codec()->setposition(&file->state, 0, 0, FMOD_TIMEUNIT_PCM);   /* FMOD rewinds right after open */
-    if (decodeFirst) {
+    if (setup == SEEK_AFTER_EOF) {
         read_all(file, 4096, tail);
         free(tail->pcm);
+    } else if (setup == SEEK_PLAYING) {
+        static short scratch[4096 * AMPAAC_MAX_CHANNELS];
+        unsigned int played = 0;
+        while (played < target + (unsigned int)file->state.waveformat->frequency / 2) {
+            unsigned int got = 0;
+            if (codec()->read(&file->state, scratch, 4096, &got) != FMOD_OK || got == 0) {
+                break;
+            }
+            played += got;
+        }
     }
     res = codec()->setposition(&file->state, 0, target, FMOD_TIMEUNIT_PCM);
     if (res == FMOD_OK) {
@@ -229,16 +256,22 @@ static void test_fixture(const fixture* fx) {
     CHECK(res == FMOD_OK, "decode: result %d", res);
     CHECK(whole.rate == fx->rate, "rate %d, want %d", whole.rate, fx->rate);
     CHECK(whole.channels == fx->channels, "channels %d, want %d", whole.channels, fx->channels);
-    CHECK(whole.frames >= want && whole.frames <= want + want / 10,
-          "decoded %u frames, want 3.0 s (%u) plus encoder padding", whole.frames, want);
     check_tones(&whole, "whole");
 
-    /* FMOD ends a stream at the declared length, so ADTS declares none; the estimate travels as a tag
-       and becomes exact at EOF. */
-    CHECK(whole.declaredLength == AMPAAC_UNKNOWN, "declared length %u, want unknown", whole.declaredLength);
-    CHECK(whole.tagAtOpenMs > 0 && fabs((double)whole.tagAtOpenMs - frames_to_ms(whole.frames, whole.rate))
-          < frames_to_ms(whole.frames, whole.rate) * 0.15,
-          "length tag at open %u ms vs decoded %u ms", whole.tagAtOpenMs, frames_to_ms(whole.frames, whole.rate));
+    if (fx->mp4) {
+        /* M4A: exact length declared to FMOD; priming and padding trimmed (alignment: test_alignment). */
+        CHECK(whole.frames == want, "decoded %u frames, want exactly 3.0 s (%u)", whole.frames, want);
+        CHECK(whole.declaredLength == want, "declared length %u, want %u", whole.declaredLength, want);
+    } else {
+        /* FMOD ends a stream at the declared length, so ADTS declares none; the estimate travels as a tag
+           and becomes exact at EOF. */
+        CHECK(whole.frames >= want && whole.frames <= want + want / 10,
+              "decoded %u frames, want 3.0 s (%u) plus encoder priming and padding", whole.frames, want);
+        CHECK(whole.declaredLength == AMPAAC_UNKNOWN, "declared length %u, want unknown", whole.declaredLength);
+        CHECK(whole.tagAtOpenMs > 0 && fabs((double)whole.tagAtOpenMs - frames_to_ms(whole.frames, whole.rate))
+              < frames_to_ms(whole.frames, whole.rate) * 0.15,
+              "length tag at open %u ms vs decoded %u ms", whole.tagAtOpenMs, frames_to_ms(whole.frames, whole.rate));
+    }
     CHECK(whole.tagAtEndMs == frames_to_ms(whole.frames, whole.rate),
           "length tag at EOF %u ms, want exact %u ms", whole.tagAtEndMs, frames_to_ms(whole.frames, whole.rate));
 
@@ -283,34 +316,39 @@ static void test_fixture(const fixture* fx) {
         close_file(&file);
     }
 
-    /* Exact seeks land on the continuous decode's sample positions. Into the decoded region: LC is
-       bit-exact, SBR/PS leave a few LSB of fixed-point residue after the pre-roll. Ahead of anything
-       decoded (header walk), the decoder knows only the opening frames' SBR/PS headers; parametric stereo
-       then renders slightly differently until the stream's next header (~0.8 s in these fixtures), where
-       it converges. A dormant SBR (the AACDEC_INTR failure) shows as thousands of LSB. */
+    /* Exact seeks land on the continuous decode's sample positions. A warm decoder (seek while playing):
+       LC is bit-exact, SBR/PS leave a few LSB of fixed-point residue after the pre-roll. A decoder that
+       knows only the opening frames' SBR/PS headers (seek before decoding; seek after EOF, where the drain
+       idled SBR and the decoder is re-primed) renders parametric stereo slightly differently until the
+       stream's next header (~0.8 s in these fixtures), then converges. A dormant SBR (the AACDEC_INTR
+       failure) shows as thousands of LSB. */
     {
+        static const char* const names[] = { "fresh (header walk)", "while playing", "after EOF" };
         unsigned int target = (unsigned int)(1.3 * fx->rate);
-        decoded      tail;
-        double       early;
-        double       later;
+        int          setup;
 
-        res = seek_and_decode(&src, 1, target, &tail, &file);
-        CHECK(res == FMOD_OK && tail.frames == whole.frames - target, "seek (decoded) %d, %u frames, want %u",
-              res, tail.frames, whole.frames - target);
-        early = seek_divergence(&whole, &tail, target, 0, 4096);
-        printf("  exact seek (decoded region): max |diff| %.0f\n", early);
-        CHECK(early <= 4, "exact seek (decoded) diverges from the continuous decode (max |diff| %.0f)", early);
-        free(tail.pcm);
+        for (setup = SEEK_FRESH; setup <= SEEK_AFTER_EOF; setup++) {
+            decoded tail;
+            double  early;
+            double  later;
 
-        res = seek_and_decode(&src, 0, target, &tail, &file);
-        CHECK(res == FMOD_OK && tail.frames == whole.frames - target, "seek (walked) %d, %u frames, want %u",
-              res, tail.frames, whole.frames - target);
-        early = seek_divergence(&whole, &tail, target, 0, 4096);
-        later = seek_divergence(&whole, &tail, target, (unsigned int)fx->rate, 4096);
-        printf("  exact seek (header walk): max |diff| %.0f, %.0f after 1 s\n", early, later);
-        CHECK(early <= 2048, "exact seek (walked) starts with dormant SBR/PS (max |diff| %.0f)", early);
-        CHECK(later <= 4, "exact seek (walked) has not converged 1 s on (max |diff| %.0f)", later);
-        free(tail.pcm);
+            res = seek_and_decode(&src, (seek_setup)setup, target, &tail, &file);
+            CHECK(res == FMOD_OK && tail.frames == whole.frames - target, "seek (%s) %d, %u frames, want %u",
+                  names[setup], res, tail.frames, whole.frames - target);
+            if (res != FMOD_OK) {
+                continue;
+            }
+            early = seek_divergence(&whole, &tail, target, 0, 4096);
+            later = seek_divergence(&whole, &tail, target, (unsigned int)fx->rate, 4096);
+            printf("  exact seek (%s): max |diff| %.0f, %.0f after 1 s\n", names[setup], early, later);
+            if (setup == SEEK_PLAYING) {
+                CHECK(early <= 4, "exact seek (%s) diverges from the continuous decode (max |diff| %.0f)", names[setup], early);
+            } else {
+                CHECK(early <= 2048, "exact seek (%s) starts with dormant SBR/PS (max |diff| %.0f)", names[setup], early);
+            }
+            CHECK(later <= 4, "exact seek (%s) has not converged 1 s on (max |diff| %.0f)", names[setup], later);
+            free(tail.pcm);
+        }
     }
 
     /* No walk budget: the seek lands by the mean frame size; audio continues near the target. */
@@ -320,7 +358,7 @@ static void test_fixture(const fixture* fx) {
         unsigned int saved = ampaac_hop_budget_ms;
 
         ampaac_hop_budget_ms = 0;
-        res = seek_and_decode(&src, 0, target, &tail, &file);
+        res = seek_and_decode(&src, SEEK_FRESH, target, &tail, &file);
         ampaac_hop_budget_ms = saved;
         CHECK(res == FMOD_OK, "estimated seek %d", res);
         CHECK(tail.frames + 3 * 2048 > whole.frames - target && tail.frames < whole.frames - target + 3 * 2048,
@@ -329,7 +367,8 @@ static void test_fixture(const fixture* fx) {
         free(tail.pcm);
     }
 
-    /* Source without a size: no length at all (FmodPlayer treats it as live), decode unchanged. */
+    /* Source without a size: ADTS has no length at all (FmodPlayer treats it as live); M4A still knows
+       its length from the sample tables. Decode unchanged. */
     {
         decoded live;
         fake_file_init(&file, src.data, src.size);
@@ -337,8 +376,13 @@ static void test_fixture(const fixture* fx) {
         res = open_file(&file, 0);
         CHECK(res == FMOD_OK, "unknown-size open %d", res);
         if (res == FMOD_OK) {
-            CHECK(file.state.waveformat->lengthpcm == AMPAAC_UNKNOWN && file.lengthTags == 0,
-                  "unknown-size: declared %u, %d length tags", file.state.waveformat->lengthpcm, file.lengthTags);
+            if (fx->mp4) {
+                CHECK(file.state.waveformat->lengthpcm == want, "unknown-size M4A: declared %u, want %u",
+                      file.state.waveformat->lengthpcm, want);
+            } else {
+                CHECK(file.state.waveformat->lengthpcm == AMPAAC_UNKNOWN && file.lengthTags == 0,
+                      "unknown-size: declared %u, %d length tags", file.state.waveformat->lengthpcm, file.lengthTags);
+            }
             read_all(&file, 4096, &live);
             CHECK(live.frames == whole.frames, "unknown-size decoded %u, want %u", live.frames, whole.frames);
             free(live.pcm);
@@ -346,8 +390,8 @@ static void test_fixture(const fixture* fx) {
         }
     }
 
-    /* ICY cut: the capture starts mid-frame. */
-    {
+    /* ICY cut: the capture starts mid-frame (ADTS only). */
+    if (!fx->mp4) {
         unsigned int   junk = 700;
         unsigned char* cut = (unsigned char*)malloc(src.size + junk);
         decoded        icy;
@@ -378,9 +422,13 @@ static void test_fixture(const fixture* fx) {
         decoded        damaged;
 
         res = decode_blob(src.data, src.size - 333, 4096, &damaged);
-        CHECK(res == FMOD_OK && damaged.frames < whole.frames && damaged.frames > whole.frames / 2,
-              "truncated decode %d, %u frames", res, damaged.frames);
-        free(damaged.pcm);
+        if (fx->moovEnd) {
+            CHECK(res == FMOD_ERR_FORMAT, "truncated moov: open %d, want FMOD_ERR_FORMAT", res);
+        } else {
+            CHECK(res == FMOD_OK && damaged.frames <= whole.frames && damaged.frames > whole.frames / 2,
+                  "truncated decode %d, %u frames", res, damaged.frames);
+            free(damaged.pcm);
+        }
 
         memcpy(bad, src.data, src.size);
         memset(bad + src.size / 2, 0, 200);
@@ -394,6 +442,96 @@ static void test_fixture(const fixture* fx) {
     CHECK(fake_live_allocations() == 0, "%ld allocations leaked", fake_live_allocations());
     free(whole.pcm);
     free(src.data);
+}
+
+/* The analytic chirp make_fixtures.py encodes: left 200 Hz → 4 kHz, right 4 kHz → 200 Hz over 1.5 s. */
+static double chirp_ideal(int n, int rate, int rising) {
+    const double seconds = 1.5;
+    const double low = 200.0;
+    const double high = 4000.0;
+    double       t = (double)n / rate;
+    double       f0 = rising ? low : high;
+    double       f1 = rising ? high : low;
+    return sin(6.283185307179586 * (f0 * t + (f1 - f0) / (2 * seconds) * t * t));
+}
+
+static double chirp_correlation(const decoded* d, int lag) {
+    double sum = 0;
+    int    n;
+    for (n = d->rate / 5; n < (int)(1.2 * d->rate) && n < (int)d->frames; n += 2) {
+        int m = n + lag;
+        if (m < 0) {
+            continue;
+        }
+        sum += d->pcm[(size_t)n * 2] * chirp_ideal(m, d->rate, 1) + d->pcm[(size_t)n * 2 + 1] * chirp_ideal(m, d->rate, 0);
+    }
+    return sum;
+}
+
+/* The lag at which decoded[n] best matches source[n + lag] (coarse, then fine). */
+static int chirp_lag(const decoded* d) {
+    int    lag;
+    int    best = 0;
+    double bestSum = -1e300;
+    int    center;
+
+    for (lag = -4500; lag <= 4500; lag += 4) {
+        double sum = chirp_correlation(d, lag);
+        if (sum > bestSum) {
+            bestSum = sum;
+            best    = lag;
+        }
+    }
+    center = best;
+    for (lag = center - 4; lag <= center + 4; lag++) {
+        double sum = chirp_correlation(d, lag);
+        if (sum > bestSum) {
+            bestSum = sum;
+            best    = lag;
+        }
+    }
+    return best;
+}
+
+/*
+ * Output lines up with the encoder's input: fdk's own delay (outputDelay) is trimmed with the container's
+ * priming, and drained back at the end. M4A lands on the source sample for sample; ADTS carries no
+ * priming information, so it sits exactly the encoder's 2112-sample priming late (Apple's decoder does
+ * the same).
+ */
+static void test_alignment(void) {
+    static const struct { const char* name; int rate; int lag; } cases[] = {
+        { "chirp_lc_44k.m4a", 44100, 0 },
+        { "chirp_he_48k.m4a", 48000, 0 },
+        { "chirp_lc_44k.aac", 44100, -2112 },
+    };
+    unsigned int i;
+
+    printf("alignment\n");
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        blob        src = load(cases[i].name);
+        decoded     d;
+        FMOD_RESULT res = decode_blob(src.data, src.size, 4096, &d);
+        int         lag;
+
+        CHECK(res == FMOD_OK && d.channels == 2, "%s: decode %d", cases[i].name, res);
+        if (res == FMOD_OK && d.channels == 2) {
+            lag = chirp_lag(&d);
+            printf("  %s: output[n] = source[n %+d]\n", cases[i].name, lag);
+            CHECK(lag == cases[i].lag, "%s: output sits at source[n %+d], want %+d", cases[i].name, lag, cases[i].lag);
+            if (cases[i].lag == 0) {
+                /* The drain restored the tail: the last 50 ms still carries the chirp. */
+                unsigned int want = (unsigned int)(1.5 * cases[i].rate);
+                unsigned int tail = (unsigned int)cases[i].rate / 20;
+                CHECK(d.frames == want, "%s: decoded %u frames, want %u", cases[i].name, d.frames, want);
+                CHECK(d.frames >= tail && rms(d.pcm + (size_t)(d.frames - tail) * 2, tail * 2) > 4000,
+                      "%s: the last 50 ms is near-silent (drain lost)", cases[i].name);
+            }
+            free(d.pcm);
+        }
+        free(src.data);
+    }
+    CHECK(fake_live_allocations() == 0, "alignment: %ld allocations leaked", fake_live_allocations());
 }
 
 static void expect_format_error(const char* what, const unsigned char* data, unsigned int size) {
@@ -431,7 +569,7 @@ static void test_rejects(void) {
     memcpy(buf, "OggS", 4);
     expect_format_error("ogg", buf, 4096);
     memcpy(buf, "\x00\x00\x00\x20" "ftypM4A ", 12);
-    expect_format_error("mp4 (not yet)", buf, 4096);
+    expect_format_error("ftyp without moov", buf, 4096);
 
     for (n = 0; n < sizeof(buf); n++) {
         seed = seed * 1103515245u + 12345u;
@@ -462,6 +600,7 @@ int main(int argc, char** argv) {
     for (i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i++) {
         test_fixture(&fixtures[i]);
     }
+    test_alignment();
     test_rejects();
 
     printf("%d checks, %d failures\n", checks, failures);

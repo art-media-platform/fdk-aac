@@ -35,7 +35,7 @@ for f in /src/libAACdec/src/*.cpp /src/libArithCoding/src/*.cpp /src/libDRCdec/s
     while [ \$(jobs -r | wc -l) -ge \$(nproc) ]; do sleep 0.1; done
 done
 wait
-for f in /src/fmod/src/ampaac_codec.c /src/fmod/src/ampaac_io.c /src/fmod/src/ampaac_adts.c /src/fmod/test/fake_fmod.c /src/fmod/test/ampaac_fuzz.c; do
+for f in /src/fmod/src/ampaac_codec.c /src/fmod/src/ampaac_io.c /src/fmod/src/ampaac_adts.c /src/fmod/src/ampaac_mp4.c /src/fmod/test/fake_fmod.c /src/fmod/test/ampaac_fuzz.c; do
     clang \$SAN -std=c11 \$INC -c \"\$f\" -o \"\$(basename \"\$f\" .c).o\"
 done
 clang++ \$SAN *.o -o ampaac_fuzz
