@@ -372,8 +372,9 @@ static int parse_track(ampaac_codec* aac, const box* trak) {
 static FMOD_RESULT read_moov(ampaac_codec* aac) {
     ampaac_reader* rd = &aac->reader;
     unsigned int   pos = 0;
+    unsigned int   boxes;
 
-    for (;;) {
+    for (boxes = 0; boxes < AMPAAC_BOX_LIMIT; boxes++) {
         const unsigned char* p;
         unsigned int         avail;
         unsigned long long   size;
@@ -432,6 +433,7 @@ static FMOD_RESULT read_moov(ampaac_codec* aac) {
             return FMOD_ERR_FORMAT;
         }
     }
+    return FMOD_ERR_FORMAT;
 }
 
 FMOD_RESULT ampaac_mp4_open(ampaac_codec* aac) {
@@ -498,13 +500,20 @@ void ampaac_mp4_set_trim(ampaac_codec* aac) {
         lead   = mp4->smpbPriming * rate / mp4->timescale;
         length = mp4->smpbSamples * rate / mp4->timescale;
     }
-    if (lead > total) {
+    if (lead > total || lead + delay >= AMPAAC_UNKNOWN) {
         lead = 0;
     }
-    if (length == 0 || lead + length > total) {
+    if (length == 0 || length > total - lead) {
         length = total - lead;
     }
-    aac->leadPcm     = (unsigned int)(lead + delay);
+    aac->leadPcm = (unsigned int)(lead + delay);
+    if (lead + delay + length >= AMPAAC_UNKNOWN) {
+        /* Past FMOD's 32-bit PCM positions: play to the end without declaring a length. */
+        aac->endPcm      = AMPAAC_UNKNOWN;
+        aac->lengthPcm   = AMPAAC_UNKNOWN;
+        aac->lengthExact = 0;
+        return;
+    }
     aac->endPcm      = (unsigned int)(lead + delay + length);
     aac->lengthPcm   = (unsigned int)length;
     aac->lengthExact = 1;
@@ -534,18 +543,20 @@ FMOD_RESULT ampaac_mp4_next(ampaac_codec* aac, unsigned int* auLen) {
     return FMOD_OK;
 }
 
-/* Decoding restarts AMPAAC_PREROLL_AUS access units ahead of the target's, or from the sync sample at or
-   before it when the track has stss (xHE-AAC decodes only from immediate-playout frames). */
+/* Decoding restarts AMPAAC_PREROLL_AUS access units ahead of the target's. xHE-AAC (USAC) decodes only
+   from immediate-playout frames, so there it starts at the sync sample (stss) at or before that point;
+   for other object types every access unit decodes after the pre-roll, and stss is ignored. */
 FMOD_RESULT ampaac_mp4_seek(ampaac_codec* aac, unsigned int targetPcm) {
-    ampaac_mp4*  mp4 = &aac->mp4;
-    unsigned int au = aac->frameSize ? targetPcm / (unsigned int)aac->frameSize : 0;
-    unsigned int start;
+    ampaac_mp4*        mp4 = &aac->mp4;
+    unsigned int       au = aac->frameSize ? targetPcm / (unsigned int)aac->frameSize : 0;
+    unsigned int       start;
+    unsigned long long pcm;
 
     if (au >= mp4->samples) {
         au = mp4->samples ? mp4->samples - 1 : 0;
     }
     start = au > AMPAAC_PREROLL_AUS ? au - AMPAAC_PREROLL_AUS : 0;
-    if (mp4->sync && mp4->syncCount > 0) {
+    if (mp4->usac && mp4->sync && mp4->syncCount > 0) {
         /* The last sync sample at or before start (entries are 1-based and ascending). */
         unsigned int lo = 0;
         unsigned int hi = mp4->syncCount;
@@ -559,8 +570,9 @@ FMOD_RESULT ampaac_mp4_seek(ampaac_codec* aac, unsigned int targetPcm) {
         }
         start = lo > 0 ? be32(mp4->sync + (lo - 1) * 4) - 1 : 0;
     }
+    pcm             = (unsigned long long)start * (unsigned int)aac->frameSize;
     mp4->next       = start;
-    aac->decodedPcm = start * (unsigned int)aac->frameSize;
+    aac->decodedPcm = pcm < AMPAAC_UNKNOWN ? (unsigned int)pcm : AMPAAC_UNKNOWN - 1;
     aac->exact      = 1;
     return FMOD_OK;
 }

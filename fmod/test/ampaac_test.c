@@ -39,6 +39,7 @@ typedef struct decoded {
     unsigned int declaredLength;   /* waveformat.lengthpcm at open */
     unsigned int tagAtOpenMs;      /* AMPAAC_LENGTH_TAG after open, 0 if none */
     unsigned int tagAtEndMs;       /* ... after EOF */
+    int          rateTags;         /* "Sample Rate Change" tags raised */
     short*       pcm;
 } decoded;
 
@@ -142,8 +143,21 @@ static FMOD_RESULT decode_blob(const unsigned char* data, unsigned int size, uns
     out->tagAtOpenMs    = file.lengthTags ? file.lengthTagMs : 0;
     res = read_all(&file, chunk, out);
     out->tagAtEndMs     = file.lengthTags ? file.lengthTagMs : 0;
+    out->rateTags       = file.sampleRateTags;
     close_file(&file);
     return res;
+}
+
+/* RMS of one channel over frames [from, from + count). */
+static double channel_rms(const decoded* d, int channel, unsigned int from, unsigned int count) {
+    double       sum = 0;
+    unsigned int i;
+
+    for (i = from; i < from + count && i < d->frames; i++) {
+        double v = d->pcm[(size_t)i * d->channels + channel];
+        sum += v * v;
+    }
+    return count ? sqrt(sum / count) : 0;
 }
 
 static unsigned int frames_to_ms(unsigned int frames, int rate) {
@@ -283,6 +297,32 @@ static void test_fixture(const fixture* fx) {
           "ACCURATETIME declared length %u, want %u", res == FMOD_OK ? file.state.waveformat->lengthpcm : 0, whole.frames);
     if (res == FMOD_OK) {
         close_file(&file);
+    }
+
+    /* Trailing tags (an APE footer, then ID3v1) follow the last frame: the length stays exact at EOF and in
+       the ACCURATETIME walk. */
+    if (!fx->mp4) {
+        unsigned char* tagged = (unsigned char*)malloc(src.size + 160);
+        decoded        trailed;
+
+        memcpy(tagged, src.data, src.size);
+        memset(tagged + src.size, 0, 160);
+        memcpy(tagged + src.size, "APETAGEX", 8);
+        memcpy(tagged + src.size + 32, "TAG", 3);
+        res = decode_blob(tagged, src.size + 160, 4096, &trailed);
+        CHECK(res == FMOD_OK && trailed.frames == whole.frames && trailed.tagAtEndMs == frames_to_ms(whole.frames, whole.rate),
+              "trailing tags: %d, %u frames, length tag %u ms (want %u frames, %u ms)", res, trailed.frames,
+              trailed.tagAtEndMs, whole.frames, frames_to_ms(whole.frames, whole.rate));
+        free(trailed.pcm);
+        fake_file_init(&file, tagged, src.size + 160);
+        res = open_file(&file, FMOD_ACCURATETIME);
+        CHECK(res == FMOD_OK && file.state.waveformat->lengthpcm == whole.frames,
+              "ACCURATETIME with trailing tags: length %u, want %u", res == FMOD_OK ? file.state.waveformat->lengthpcm : 0,
+              whole.frames);
+        if (res == FMOD_OK) {
+            close_file(&file);
+        }
+        free(tagged);
     }
 
     /* Trickling reads decode bit-identically. */
@@ -436,6 +476,8 @@ static void test_fixture(const fixture* fx) {
         res = decode_blob(bad, src.size, 4096, &damaged);
         CHECK(res == FMOD_OK && damaged.frames + 8 * 2048 > whole.frames && damaged.frames <= whole.frames + 8 * 2048,
               "corrupted decode %d, %u frames (clean %u)", res, damaged.frames, whole.frames);
+        /* Concealment runs at the core rate under implicit SBR: it must not read as a rate change. */
+        CHECK(damaged.rateTags == 0, "corrupted decode raised %d Sample Rate Change tags", damaged.rateTags);
         free(damaged.pcm);
         free(bad);
     }
@@ -654,6 +696,28 @@ static void test_rejects(void) {
     memcpy(buf, "\x00\x00\x00\x20" "ftypM4A ", 12);
     expect_format_error("ftyp without moov", buf, 4096);
 
+    /* A foreign magic ahead of real ADTS frames: the resync would skip these bytes and open the stream, so
+       only the magic check rejects them (formats FMOD tries after ampaac, or level with it: FLAC, AIFF). */
+    {
+        static const struct { const char* name; const char* magic; unsigned int size; } tagged[] = {
+            { "flac magic + adts", "fLaC", 4 },
+            { "aiff magic + adts", "FORM\x00\x00\x51\x00" "AIFF", 12 },
+            { "ogg magic + adts",  "OggS", 4 },
+            { "wav magic + adts",  "RIFF\x24\x00\x01\x00" "WAVE", 12 },
+        };
+        blob           adts = load("adts_lc_44k_stereo.aac");
+        unsigned char* data = (unsigned char*)malloc(adts.size + 12);
+        unsigned int   t;
+
+        for (t = 0; t < sizeof(tagged) / sizeof(tagged[0]); t++) {
+            memcpy(data, tagged[t].magic, tagged[t].size);
+            memcpy(data + tagged[t].size, adts.data, adts.size);
+            expect_format_error(tagged[t].name, data, adts.size + tagged[t].size);
+        }
+        free(data);
+        free(adts.data);
+    }
+
     for (n = 0; n < sizeof(buf); n++) {
         seed = seed * 1103515245u + 12345u;
         buf[n] = (unsigned char)(seed >> 16);
@@ -662,13 +726,140 @@ static void test_rejects(void) {
     expect_format_error("empty", buf, 0);
     expect_format_error("tiny", buf, 5);
 
-    /* A file error during the probe is a load failure, not a format verdict. */
+    /* Before the data shows ftyp or an ADTS chain, a file error answers FMOD_ERR_FORMAT: FMOD's own codecs
+       still get their turn. */
     fake_file_init(&file, buf, sizeof(buf));
     file.failAtPos = FMOD_ERR_NET_SOCKET_ERROR;
     file.failPos   = 0;
     res = open_file(&file, 0);
-    CHECK(res == FMOD_ERR_NET_SOCKET_ERROR, "socket error at open: %d, want FMOD_ERR_NET_SOCKET_ERROR", res);
+    CHECK(res == FMOD_ERR_FORMAT, "socket error before any AAC evidence: %d, want FMOD_ERR_FORMAT", res);
     CHECK(fake_live_allocations() == 0, "socket error: %ld allocations leaked", fake_live_allocations());
+
+    /* After ftyp it is a load failure: the moov read at the end of the file fails. */
+    {
+        blob m4a = load("m4a_lc_44k_moovend.m4a");
+        fake_file_init(&file, m4a.data, m4a.size);
+        file.failAtPos = FMOD_ERR_NET_SOCKET_ERROR;
+        file.failPos   = 8192;
+        res = open_file(&file, 0);
+        CHECK(res == FMOD_ERR_NET_SOCKET_ERROR, "socket error in the moov read: %d, want FMOD_ERR_NET_SOCKET_ERROR", res);
+        CHECK(fake_live_allocations() == 0, "moov socket error: %ld allocations leaked", fake_live_allocations());
+        free(m4a.data);
+    }
+
+    /* Mid-stream, reads return the error after the frames before it, not an end of stream. */
+    {
+        blob    adts = load("adts_lc_44k_stereo.aac");
+        decoded out;
+        fake_file_init(&file, adts.data, adts.size);
+        file.failAtPos = FMOD_ERR_NET_SOCKET_ERROR;
+        file.failPos   = adts.size / 2;
+        res = open_file(&file, 0);
+        CHECK(res == FMOD_OK, "mid-stream fault: open %d", res);
+        if (res == FMOD_OK) {
+            res = read_all(&file, 4096, &out);
+            CHECK(res == FMOD_ERR_NET_SOCKET_ERROR && out.frames > 0,
+                  "mid-stream socket error: %d after %u frames, want FMOD_ERR_NET_SOCKET_ERROR after some", res, out.frames);
+            free(out.pcm);
+            close_file(&file);
+        }
+        CHECK(fake_live_allocations() == 0, "mid-stream fault: %ld allocations leaked", fake_live_allocations());
+        free(adts.data);
+    }
+}
+
+/* A long ADTS stream (the LC fixture's frames repeated past the index's 4096 anchors x 8 frames): the index
+   halves itself as the walk fills it, and seeks through it still land exactly. */
+static void test_long_adts(void) {
+    blob           src = load("adts_lc_44k_stereo.aac");
+    unsigned int   copies = 260;   /* 132 frames each: 34,320 frames, ~13 min */
+    unsigned int   size = src.size * copies;
+    unsigned char* data = (unsigned char*)malloc(size);
+    decoded        whole;
+    fake_file      file;
+    FMOD_RESULT    res;
+    unsigned int   n;
+
+    printf("long adts\n");
+    for (n = 0; n < copies; n++) {
+        memcpy(data + (size_t)n * src.size, src.data, src.size);
+    }
+    res = decode_blob(data, size, 1 << 16, &whole);
+    CHECK(res == FMOD_OK && whole.frames > 34000u * 1024u, "long decode %d, %u frames", res, whole.frames);
+
+    fake_file_init(&file, data, size);
+    res = open_file(&file, FMOD_ACCURATETIME);
+    CHECK(res == FMOD_OK && file.state.waveformat->lengthpcm == whole.frames,
+          "long ACCURATETIME length %u, want %u", res == FMOD_OK ? file.state.waveformat->lengthpcm : 0, whole.frames);
+    if (res == FMOD_OK) {
+        ampaac_codec* aac = (ampaac_codec*)file.state.plugindata;
+        unsigned int  targets[] = { whole.frames - 44100 * 3, whole.frames / 2 + 777, 1024 * 1000 + 5 };
+        unsigned int  t;
+
+        CHECK(aac->indexStride > 8, "index stride %u: the walk never filled the index", aac->indexStride);
+        for (t = 0; t < sizeof(targets) / sizeof(targets[0]); t++) {
+            unsigned int got = 0;
+            short        pcm[4096 * 2];
+            unsigned int count;
+            double       diff = 0;
+            unsigned int i;
+
+            res = codec()->setposition(&file.state, 0, targets[t], FMOD_TIMEUNIT_PCM);
+            CHECK(res == FMOD_OK, "long seek %u: %d", targets[t], res);
+            res = codec()->read(&file.state, pcm, 4096, &got);
+            count = got < whole.frames - targets[t] ? got : whole.frames - targets[t];
+            for (i = 0; i < count * 2; i++) {
+                double d = fabs((double)pcm[i] - whole.pcm[(size_t)targets[t] * 2 + i]);
+                diff = d > diff ? d : diff;
+            }
+            CHECK(res == FMOD_OK && count > 0 && diff <= 1, "long seek to %u: max |diff| %.0f over %u frames",
+                  targets[t], diff, count);
+        }
+        close_file(&file);
+    }
+    free(whole.pcm);
+    free(data);
+    free(src.data);
+    CHECK(fake_live_allocations() == 0, "long adts: %ld allocations leaked", fake_live_allocations());
+}
+
+/* fdk's mixer pins output to 1, 2, 6 or 8 channels: 3 channels extend to 6 (3/0/2.1, the new channels zero),
+   and a stream whose layout changes mid-way keeps FMOD's format and reaches its end. */
+static void test_channels(void) {
+    static const struct { const char* name; unsigned int seconds; int parts[2]; } cases[] = {
+        { "adts_lc_44k_3ch.aac",             1, { 3, 0 } },
+        { "adts_lc_44k_5ch_then_stereo.aac", 2, { 5, 2 } },
+    };
+    unsigned int i;
+
+    printf("channels\n");
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        blob         src = load(cases[i].name);
+        decoded      out;
+        unsigned int want = cases[i].seconds * 44100;
+        FMOD_RESULT  res = decode_blob(src.data, src.size, 4096, &out);
+
+        CHECK(res == FMOD_OK && out.channels == 6 && out.frames >= want && out.frames <= want + want / 10,
+              "%s: %d, %d channels, %u frames (want 6 channels, %u frames plus priming)", cases[i].name, res,
+              out.channels, out.frames, want);
+        if (res == FMOD_OK && out.channels == 6) {
+            unsigned int p;
+            for (p = 0; p < 2 && cases[i].parts[p]; p++) {
+                /* The middle of each 1 s part; WAV order FL FR FC LFE BL BR. */
+                unsigned int from = p * 44100 + 11025;
+                int          c;
+                for (c = 0; c < 6; c++) {
+                    int    carries = cases[i].parts[p] == 2 ? c < 2 : cases[i].parts[p] == 3 ? c < 3 : c != 3;
+                    double level = channel_rms(&out, c, from, 22050);
+                    CHECK(carries ? level > 1000 : level < 1, "%s part %u: channel %d rms %.1f (%s)", cases[i].name, p,
+                          c, level, carries ? "want signal" : "want silence");
+                }
+            }
+            free(out.pcm);
+        }
+        free(src.data);
+    }
+    CHECK(fake_live_allocations() == 0, "channels: %ld allocations leaked", fake_live_allocations());
 }
 
 int main(int argc, char** argv) {
@@ -686,6 +877,8 @@ int main(int argc, char** argv) {
     test_alignment();
     test_stack_depth();
     test_rejects();
+    test_channels();
+    test_long_adts();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

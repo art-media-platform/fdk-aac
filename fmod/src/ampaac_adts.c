@@ -1,8 +1,8 @@
 /*
  * ampaac — ADTS container: probe, frame walk, resync, seek index and length estimate.
  *
- * ADTS carries no index, and FMOD ends a stream at the length declared at open (padding silence or cutting
- * the tail), so ADTS declares its length unknown and FMOD ends at the decoder's EOF. The seek index maps
+ * ADTS carries no index, and FMOD ends a stream at the length declared at open (playing on past the data
+ * or cutting the tail), so ADTS declares its length unknown and FMOD ends at the decoder's EOF. The seek index maps
  * file offsets to PCM exactly: frames are fed one at a time while decoding, and a seek walks frame headers
  * forward (no decode) within a time budget. Past what is walked, positions are estimated.
  */
@@ -134,9 +134,12 @@ void ampaac_adts_reset_index(ampaac_codec* aac) {
 }
 
 /* Scans forward for a chained sync and moves the reader onto it. `from` is 1 when the frame at the read
-   position already failed, 0 when the read position itself may start a chain (a seek landing). */
+   position already failed, 0 when the read position itself may start a chain (a seek landing). Past
+   AMPAAC_RESYNC_LIMIT bytes without a chain the stream counts as ended: one read call must not scan an
+   unbounded transfer. */
 static FMOD_RESULT resync(ampaac_codec* aac, unsigned int from) {
     ampaac_reader* rd = &aac->reader;
+    unsigned int   scanned = 0;
 
     for (;;) {
         const unsigned char* window;
@@ -159,6 +162,10 @@ static FMOD_RESULT resync(ampaac_codec* aac, unsigned int from) {
         }
         /* A chain starting in the second half may have run out of window; keep that half. */
         ampaac_reader_skip(rd, avail / 2);
+        scanned += avail / 2;
+        if (scanned >= AMPAAC_RESYNC_LIMIT) {
+            return FMOD_ERR_FILE_EOF;
+        }
     }
 }
 
@@ -174,11 +181,7 @@ FMOD_RESULT ampaac_adts_open(ampaac_codec* aac) {
     ampaac_adts_header   hdr;
 
     if (found < 0) {
-        /* Too few bytes to decide is a load failure, not a verdict on the format. */
-        if (rd->fault != FMOD_OK) {
-            return rd->fault;
-        }
-        return FMOD_ERR_FORMAT;
+        return FMOD_ERR_FORMAT;   /* no chain: not established as ADTS, even when the read failed */
     }
 
     /* Mean frame size over the head window seeds the length estimate until the index outgrows it. */
@@ -245,11 +248,19 @@ FMOD_RESULT ampaac_adts_next(ampaac_codec* aac, unsigned int* auLen) {
             }
         }
 
-        /* Lost sync: bytes are skipped, so positions past this point are estimates. */
-        aac->exact = 0;
-        res = resync(aac, 1);
-        if (res != FMOD_OK) {
-            return res;
+        /* Lost sync: bytes are skipped, so positions past this point are estimates, unless no frame
+           follows: then the bytes were a trailer (ID3v1, APE, Lyrics3), not lost audio. */
+        {
+            int wasExact = aac->exact;
+
+            aac->exact = 0;
+            res = resync(aac, 1);
+            if (res == FMOD_ERR_FILE_EOF) {
+                aac->exact = wasExact;
+            }
+            if (res != FMOD_OK) {
+                return res;
+            }
         }
     }
 }
@@ -283,6 +294,11 @@ static void hop_toward(ampaac_codec* aac, unsigned int target, unsigned int budg
             break;
         }
         if (!ampaac_adts_parse(p, avail, &hdr)) {
+            if (resync(aac, 1) == FMOD_ERR_FILE_EOF && aac->reader.fault == FMOD_OK) {
+                /* No frame follows the last one walked (a trailing tag): that frame ends the stream. */
+                aac->lengthPcm   = at.pcm;
+                aac->lengthExact = 1;
+            }
             break;
         }
         framePcm = (unsigned int)aac->frameSize * hdr.rawBlocks;
@@ -326,7 +342,7 @@ void ampaac_adts_estimate_length(ampaac_codec* aac) {
     const ampaac_index_entry* last;
     unsigned long long        pcm;
 
-    if (aac->lengthExact || aac->indexLen == 0) {
+    if (aac->lengthExact || aac->lengthFinal || aac->indexLen == 0) {
         return;
     }
     mean = mean_frame_bytes(aac);

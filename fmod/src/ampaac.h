@@ -19,6 +19,10 @@
 #define AMPAAC_PREROLL_AUS   8         /* access units decoded and dropped ahead of a seek target (PS needs ~8) */
 #define AMPAAC_READ_THROUGH  262144u   /* forward jumps up to this far are read through, not seeked */
 #define AMPAAC_HOP_BUDGET_MS 100u      /* ADTS: time a seek may spend walking frame headers */
+#define AMPAAC_RESYNC_LIMIT  1048576u  /* ADTS: bytes one resync scans before the stream counts as ended */
+#define AMPAAC_BOX_LIMIT     4096u     /* MP4: top-level boxes walked looking for moov */
+#define AMPAAC_STARTUP_DROP  8u        /* frames at another rate a restarted decoder may drop (SBR start-up) */
+#define AMPAAC_CONCEAL_LIMIT_MS 10000u /* consecutive concealed output that ends the stream */
 #define AMPAAC_LENGTH_TAG    "AMPAAC_LENGTH_MS"   /* FMOD_TAGTYPE_USER, INT: length estimate for a stream
                                                      FMOD reports as unknown length */
 #define AMPAAC_UNKNOWN       0xFFFFFFFFu
@@ -79,6 +83,7 @@ typedef struct ampaac_mp4 {
     unsigned int         samples;         /* access units */
     const unsigned char* sync;            /* stss table (1-based, big-endian), NULL when every AU syncs */
     unsigned int         syncCount;
+    int                  usac;            /* AOT 42: decoding restarts only at a sync sample (stss) */
     int                  hasEdit;         /* elst: priming and presented duration */
     unsigned long long   editMediaTime;
     unsigned long long   editDuration;
@@ -100,7 +105,8 @@ typedef struct ampaac_codec {
     HANDLE_AACDECODER     decoder;
     ampaac_container      container;
 
-    /* Output format, fixed at open. */
+    /* Output format: channels are fixed at open (pinned in fdk's mixer); the rate and frame size change
+       only on a clean frame, with a "Sample Rate Change" tag. */
     int                   channels;
     int                   sampleRate;
     int                   frameSize;     /* PCM frames per decoded access unit */
@@ -113,6 +119,7 @@ typedef struct ampaac_codec {
     unsigned int          endPcm;
     unsigned int          lengthPcm;     /* current length estimate, AMPAAC_UNKNOWN if none */
     int                   lengthExact;   /* lengthPcm is the true end, not an estimate */
+    int                   lengthFinal;   /* lengthPcm is the decoded total at the end of the stream */
     unsigned int          publishedMs;   /* last AMPAAC_LENGTH_TAG value sent, 0 if none */
     unsigned int          framesSincePublish;
     unsigned int          discard;       /* PCM frames still to drop (seek pre-roll and in-frame offset) */
@@ -121,7 +128,9 @@ typedef struct ampaac_codec {
     unsigned int          decoderDelay;  /* CStreamInfo.outputDelay: samples fdk's output trails the model */
     unsigned int          drainLeft;     /* delayed samples still to flush out after the last access unit */
     int                   flushed;       /* AACDEC_FLUSH ran: SBR/PS dropped to upsampling (re-prime on seek) */
-    int                   started;       /* a frame has been handed out since open */
+    int                   started;       /* a frame has been handed out since the decoder last started clean */
+    unsigned int          startupDrops;  /* frames at another rate dropped since then */
+    unsigned int          concealRun;    /* consecutive concealed frames */
     int                   exact;         /* decodedPcm is exact (continuous decode from an exact anchor) */
 
     /* PCM carry: one decoded access unit handed out across read calls. */
