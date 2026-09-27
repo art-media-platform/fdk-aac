@@ -21,7 +21,7 @@
 #define AMPAAC_HOP_BUDGET_MS 100u      /* ADTS: time a seek may spend walking frame headers */
 #define AMPAAC_RESYNC_LIMIT  1048576u  /* ADTS: bytes one resync scans before the stream counts as ended */
 #define AMPAAC_TRAILER_MAX   65536u    /* ADTS: bytes before the end a trailing tag (ID3v1, APE, Lyrics3) spans */
-#define AMPAAC_BOX_LIMIT     4096u     /* MP4: top-level boxes walked looking for moov */
+#define AMPAAC_BOX_LIMIT     64u       /* MP4: top-level boxes walked looking for moov (files have a handful) */
 #define AMPAAC_STARTUP_DROP  8u        /* frames at another rate a restarted decoder may drop (SBR start-up) */
 #define AMPAAC_CONCEAL_LIMIT_MS 10000u /* ADTS of unknown size: consecutive concealed output that ends it */
 #define AMPAAC_LENGTH_TAG    "AMPAAC_LENGTH_MS"   /* FMOD_TAGTYPE_USER, INT: length estimate for a stream

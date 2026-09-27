@@ -14,7 +14,8 @@ modified (see [Changes to the FDK AAC Codec](#changes-to-the-fdk-aac-codec)).
 - **Profiles:** AAC-LC, HE-AAC (SBR) and HE-AACv2 (PS), covered by the fixtures. xHE-AAC (USAC) in MP4
   goes through the same decoder path; no fixture covers it yet.
 - **Containers:** ADTS (`.aac`), including ID3v2 prefixes and streams that start mid-frame (ICY captures);
-  MP4/M4A with `moov` before or after `mdat`. Fragmented MP4 is rejected.
+  MP4/M4A with `moov` before or after `mdat`, within the first 64 top-level boxes. Fragmented MP4 is
+  rejected.
 - **Output:** 16-bit PCM in WAV channel order: 1, 2, 6 or 8 channels, the counts fdk's mixer can pin. A 3–5
   channel stream opens as 5.1 and a 7-channel one as 7.1, with the missing channels silent. The count is
   pinned at open, so a mid-stream layout change cannot change FMOD's format.

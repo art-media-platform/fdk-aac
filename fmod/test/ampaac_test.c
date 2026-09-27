@@ -726,6 +726,55 @@ static void test_rejects(void) {
     expect_format_error("empty", buf, 0);
     expect_format_error("tiny", buf, 5);
 
+    /* MP4: the walk for moov stops after AMPAAC_BOX_LIMIT top-level boxes. 60 free boxes ahead of moov
+       open (their bytes shift the chunk offsets, patched); 100 answer FMOD_ERR_FORMAT. */
+    {
+        blob         m4a = load("m4a_lc_44k_stereo.m4a");
+        unsigned int counts[] = { 60, 100 };
+        unsigned int c;
+
+        for (c = 0; c < 2; c++) {
+            unsigned int   ftyp = ((unsigned int)m4a.data[0] << 24) | ((unsigned int)m4a.data[1] << 16)
+                                | ((unsigned int)m4a.data[2] << 8) | m4a.data[3];
+            unsigned int   extra = counts[c] * 8;
+            unsigned char* data = (unsigned char*)malloc(m4a.size + extra);
+            unsigned int   i;
+            FMOD_RESULT    want = c == 0 ? FMOD_OK : FMOD_ERR_FORMAT;
+
+            memcpy(data, m4a.data, ftyp);
+            for (i = 0; i < counts[c]; i++) {
+                memcpy(data + ftyp + i * 8, "\0\0\0\x08" "free", 8);
+            }
+            memcpy(data + ftyp + extra, m4a.data + ftyp, m4a.size - ftyp);
+            for (i = 0; i + 16 <= m4a.size + extra; i++) {
+                if (memcmp(data + i, "stco", 4) == 0) {
+                    unsigned int n = ((unsigned int)data[i + 8] << 24) | ((unsigned int)data[i + 9] << 16)
+                                   | ((unsigned int)data[i + 10] << 8) | data[i + 11];
+                    unsigned int e;
+                    for (e = 0; e < n && i + 16 + e * 4 <= m4a.size + extra; e++) {
+                        unsigned char* p = data + i + 12 + e * 4;
+                        unsigned int   v = (((unsigned int)p[0] << 24) | ((unsigned int)p[1] << 16)
+                                          | ((unsigned int)p[2] << 8) | p[3]) + extra;
+                        p[0] = (unsigned char)(v >> 24);
+                        p[1] = (unsigned char)(v >> 16);
+                        p[2] = (unsigned char)(v >> 8);
+                        p[3] = (unsigned char)v;
+                    }
+                    break;
+                }
+            }
+            fake_file_init(&file, data, m4a.size + extra);
+            res = open_file(&file, 0);
+            CHECK(res == want, "%u free boxes ahead of moov: open %d, want %d", counts[c], res, want);
+            if (res == FMOD_OK) {
+                close_file(&file);
+            }
+            CHECK(fake_live_allocations() == 0, "free boxes: %ld allocations leaked", fake_live_allocations());
+            free(data);
+        }
+        free(m4a.data);
+    }
+
     /* Before the data shows ftyp or an ADTS chain, a file error answers FMOD_ERR_FORMAT: FMOD's own codecs
        still get their turn. */
     fake_file_init(&file, buf, sizeof(buf));
