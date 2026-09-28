@@ -42,15 +42,17 @@ codec's data ends sooner, cuts the tail when the data runs longer, and never ask
   walk and no estimate. The walk needs a server with Range support: it reads past what FMOD can rewind without
   one, and the rewind that follows is a seek. Measured on FMOD 2.03.14: a sized ADTS stream from a server that
   does not advertise `Accept-Ranges` fails its open with `FMOD_ERR_FILE_COULDNOTSEEK`. With
-  `FMOD_ACCURATETIME`, ADTS reads a sized stream whole at open and declares its exact length; a stream without
-  a size is not walked.
+  `FMOD_ACCURATETIME`, ADTS walks a sized stream's frame headers at open to its end and declares its exact length,
+  unless the sampling rate or profile changes on the way or the samples, with the decoder's lead, would pass FMOD's
+  32-bit PCM positions (about 27 h at 44.1 kHz): the walk stops there, and the length stays an estimate. A stream
+  without a size is not walked.
 - **Seeking:** M4A seeks are sample-exact: decoding restarts 8 access units ahead of the target (xHE-AAC: from
   the sync sample at or before that point) and drops the pre-roll output. An ADTS seek to within 256 KiB of
   the nearest known frame walks frame headers forward, for up to 100 ms and at most 256 KiB, and lands exactly
   wherever the walk reaches. A farther target, or one past the budget, is estimated from the mean frame size
   (close for CBR, approximate for VBR), so a netstream's first request after the seek is for the target's
   bytes: a walk's read on a still-arriving stream would wait for them, and its budget cannot cut a read short.
-  `FMOD_ACCURATETIME` indexes the whole stream at open, so every seek lands exactly.
+  `FMOD_ACCURATETIME` indexes the stream as far as that walk reaches, and seeks inside it land exactly.
 - **Sample-rate changes** (implicit SBR found after open) arrive as FMOD's `Sample Rate Change` FLOAT tag.
 - **Netstreams** (measured on FMOD 2.03.14 against a Range server):
   - At open FMOD reads each file's tail: a Range from `floor((size − 128) / 2048) × 2048` to the end
@@ -73,28 +75,30 @@ codec's data ends sooner, cuts the tail when the data runs longer, and never ask
   missing span loops the ring's audio to the declared end (measured at 16 and 128 KiB stream buffers).
   M4A access units read from stale bytes fail to decode, and fdk's concealment holds the output near
   silence (under −66 dBFS) to the declared end. A server must never cut a body.
-- **An M4A's data ending before its declared length** (a failed decoder, a cut before the ring wraps):
-  ampaac plays silence to that length. What FMOD itself plays past a codec's early end is unmeasured.
+- **Data ending before an exact length** (an M4A's, or an ADTS stream's whose walk reached its end at open; a
+  failed decoder, a cut before the ring wraps): ampaac plays silence to that length. What FMOD itself plays past a
+  codec's early end is unmeasured.
 - **Errors:** open returns `FMOD_ERR_FORMAT` for data that is not AAC. Before the data shows `ftyp` or an
   ADTS frame chain, a network failure (`FMOD_ERR_NET_SOCKET_ERROR`, `FMOD_ERR_NET_CONNECT`, `FMOD_ERR_HTTP*`)
   ends the open as it is, and any other file error answers `FMOD_ERR_FORMAT`, which FMOD's codec API treats
-  as "not this format": it tries its next codec, which may still read the stream its own way. A fault while
-  reading through ID3v2 tags answers `FMOD_ERR_FORMAT` too: FMOD's MPEG codec skips a tag with a hard seek,
-  a new request. Measured (FMOD 2.03.14, network timeout 3 s): FMOD's next codec meets the same
-  stall, so answering `FMOD_ERR_FORMAT` for a stall inside the first 8 KB failed the open after two
-  timeouts instead of one, with the same final result. After that, a failed read is retried once at once
-  from the same offset (on a netstream, a new request, as FMOD's MP3 codec does), except after a timeout
-  (`FMOD_ERR_NET_SOCKET_ERROR`), which a retry would only repeat; a second failure passes through unchanged.
+  as "not this format": it tries its next codec, which may still read the stream its own way. Measured (FMOD
+  2.03.14, network timeout 3 s): FMOD's next codec meets the same stall, so answering `FMOD_ERR_FORMAT` for a
+  stall inside the first 8 KB failed the open after two timeouts instead of one, with the same final result. A
+  fault while reading through an ID3v2 tag's body answers `FMOD_ERR_FORMAT` as well: FMOD's MPEG codec skips a
+  tag with a hard seek, a new request. A fault at or past the last tag's end passes through, since that codec
+  requests the same bytes. Every failed read is first retried once, at once, from the same offset (on a
+  netstream, a new request, as FMOD's MP3 codec does), except after a timeout (`FMOD_ERR_NET_SOCKET_ERROR`),
+  which a retry would only repeat. Past the AAC evidence, a second failure passes through unchanged.
 - **Damage and limits:** a stream with a size or an access-unit table conceals damaged frames and decodes
   what follows. An ADTS stream of unknown size (a live source) ends after 10 s of unbroken concealment
   (logged in FMOD's debug log); any stream ends after 16 decoder failures in a row, and ADTS when a resync
   finds no frame in 1 MiB (over a hundred maximum-size frames; not logged). These ends read as a normal end
   of file, leave the length an estimate, and a later seek past them plays.
 - **Memory:** the codec's state and tables come from FMOD's allocator; fdk's decoder calls `calloc`.
-- **Stack:** a decode peaks near 50 KB of stack (`make test` measures it: 49,784 bytes on arm64, 49,848 on
-  x86_64; fdk's frame decoder alone takes 35.9 KB). FMOD's default STREAM (96 KiB) and NONBLOCKING
-  (112 KiB) thread stacks hold that with under 2× headroom on STREAM; raise both with
-  `FMOD_Thread_SetAttributes` before the first System is created (192 KiB leaves 3.9×).
+- **Stack:** a decode peaks near 50 KB of stack (`make test` measures it over the nine mono and stereo fixtures
+  and a 3- and a 5-channel one: 49,768 bytes on arm64, 49,848 on x86_64; fdk's frame decoder alone takes 35.9 KB).
+  FMOD's default STREAM (96 KiB) and NONBLOCKING (112 KiB) thread stacks hold that with under 2× headroom on
+  STREAM; raise both with `FMOD_Thread_SetAttributes` before the first System is created (192 KiB leaves 3.9×).
 
 FMOD reports a sound opened by a plugin codec as `FMOD_SOUND_TYPE_UNKNOWN`.
 
@@ -118,8 +122,9 @@ codecs, which cannot netstream AAC. Formats tried after ampaac pay its probe: an
 requests instead of 4. FMOD then rewinds the stream for its next codec. A server without Range support is
 rewound only inside the sound's file buffer (`FMOD_CREATESOUNDEXINFO::filebuffersize`, 2 KiB by default), and
 ampaac reads through up to 4 ID3v2 tags (up to 256 KiB each), then up to 8 KiB, before it rejects a stream:
-unhinted, a live MP3 without Range failed to open (`FMOD_ERR_FILE_COULDNOTSEEK`). Hint the codec for content
-you know is not AAC (`FMOD_CREATESOUNDEXINFO::suggestedsoundtype`, e.g. `FMOD_SOUND_TYPE_MPEG`): FMOD tries it
+unhinted, an MP3 from a server without Range failed to open, live or sized (`FMOD_ERR_FILE_COULDNOTSEEK`). Hint
+the codec for content you know is not AAC (`FMOD_CREATESOUNDEXINFO::suggestedsoundtype`, e.g.
+`FMOD_SOUND_TYPE_MPEG`): FMOD tries it
 first, and an AAC stream hinted MPEG still opens through ampaac. A larger file buffer also opens the live MP3,
 but it moves FMOD's tail read at open to `floor((size - 128) / buffer) * buffer`. FMOD for Unity's C# wrapper
 has no `registerCodec`: P/Invoke `FMOD5_System_RegisterCodec(IntPtr system, IntPtr description, out uint
