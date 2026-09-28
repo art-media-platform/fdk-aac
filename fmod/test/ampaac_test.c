@@ -635,22 +635,26 @@ static unsigned int peak_stack(stack_job* job) {
 }
 
 static void test_stack_depth(void) {
-    unsigned int i;
-    unsigned int worst = 0;
+    /* The multichannel fixtures run fdk's channel mapping and downmix paths the stereo ones do not. */
+    static const char* const multichannel[] = { "adts_lc_44k_3ch.aac", "adts_lc_44k_5ch_then_stereo.aac" };
+    unsigned int             stereo = sizeof(fixtures) / sizeof(fixtures[0]);
+    unsigned int             i;
+    unsigned int             worst = 0;
 
     printf("stack depth\n");
-    for (i = 0; i < sizeof(fixtures) / sizeof(fixtures[0]); i++) {
+    for (i = 0; i < stereo + sizeof(multichannel) / sizeof(multichannel[0]); i++) {
+        const char*  name = i < stereo ? fixtures[i].name : multichannel[i - stereo];
         stack_job    job;
         unsigned int used;
 
-        job.src = load(fixtures[i].name);
+        job.src = load(name);
         job.res = FMOD_OK;
         used    = peak_stack(&job);
-        CHECK(job.res == FMOD_OK, "%s: decode on the painted stack %d", fixtures[i].name, job.res);
+        CHECK(job.res == FMOD_OK, "%s: decode on the painted stack %d", name, job.res);
         if (used > worst) {
             worst = used;
         }
-        printf("  %-26s %6u bytes\n", fixtures[i].name, used);
+        printf("  %-32s %6u bytes\n", name, used);
         free(job.src.data);
     }
 #if defined(__has_feature)
