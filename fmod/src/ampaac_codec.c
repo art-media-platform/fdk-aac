@@ -66,10 +66,12 @@ F_EXPORT FMOD_CODEC_DESCRIPTION* F_CALL FMODGetCodecDescription(void) {
 }
 #endif
 
-/* ID3v2 tags ahead of ADTS: skipped by their synchsafe size. Returns the count skipped. */
-static int skip_id3v2(ampaac_reader* rd) {
+/* ID3v2 tags ahead of ADTS: skipped by their synchsafe size. Returns the count skipped; *tagsEnd is the offset past
+   the last one. */
+static int skip_id3v2(ampaac_reader* rd, unsigned int* tagsEnd) {
     int tags;
 
+    *tagsEnd = rd->pos;
     for (tags = 0; tags < 4; tags++) {
         const unsigned char* p;
         unsigned int         size;
@@ -86,6 +88,7 @@ static int skip_id3v2(ampaac_reader* rd) {
         if (p[3] >= 4 && (p[5] & 0x10)) {
             size += 10;   /* footer */
         }
+        *tagsEnd = rd->pos + size;   /* tags lead the file: at most 4 × (2^28 + 20) bytes, no wrap */
         ampaac_reader_skip(rd, size);
     }
     return tags;
@@ -513,7 +516,6 @@ static FMOD_RESULT F_CALL codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode
     FMOD_RESULT          res;
     unsigned int         tagEnd;
     int                  tagged;
-    int                  tagFault;
 
     (void)exinfo;
     aac = (ampaac_codec*)FMOD_CODEC_ALLOC(state, sizeof(ampaac_codec), 16);
@@ -532,16 +534,15 @@ static FMOD_RESULT F_CALL codec_open(FMOD_CODEC_STATE* state, FMOD_MODE usermode
         }
     }
     ampaac_reader_init(&aac->reader, state);
-    tagged   = skip_id3v2(&aac->reader);
-    tagFault = aac->reader.fault != FMOD_OK;
-    tagEnd   = aac->reader.pos;
+    tagged = skip_id3v2(&aac->reader, &tagEnd);
 
     /* Until the data shows ftyp or an ADTS chain it is not known to be AAC: FMOD's own codecs still get their
-       turn after a file error here, not after a network one. A fault inside ID3v2 tags answers FORMAT too:
-       FMOD's MPEG codec skips a tag with a hard seek, a new request, so it would not wait on this transport. */
+       turn after a file error here, not after a network one. A fault inside an ID3v2 tag answers FORMAT too:
+       FMOD's MPEG codec skips a tag with a hard seek, a new request, so it would not wait on this transport. A
+       fault at or past the last tag's end is the stream's own: that codec would request the same bytes. */
     avail = ampaac_reader_peek(&aac->reader, 12, &head);
     if (aac->reader.fault != FMOD_OK) {
-        int inTags = tagged && (tagFault || aac->reader.pos < tagEnd);
+        int inTags = tagged && aac->reader.pos < tagEnd;   /* a read-through that failed stops short of the tag's end */
         return fail_open(state, inTags ? FMOD_ERR_FORMAT : ampaac_probe_fault(aac->reader.fault));
     }
     if (foreign_magic(head, avail)) {

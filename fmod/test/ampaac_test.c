@@ -1523,7 +1523,8 @@ static void test_audit_round3(void) {
     }
 
     /* A network fault while reading through an ID3v2 tag answers FORMAT: FMOD's MPEG codec skips the tag with a new
-       request, so it would not wait on this transport. */
+       request, so it would not wait on this transport. A fault at the first byte past the last tag passes through:
+       that codec would request the same bytes. */
     {
         static unsigned char buf[100000 + 20 * 417];
         unsigned int         tagBody = 100000 - 10;
@@ -1543,6 +1544,15 @@ static void test_audit_round3(void) {
         file.failPos   = 50000;
         res = open_file(&file, 0);
         CHECK(res == FMOD_ERR_FORMAT, "socket error inside a 100 KB ID3v2 tag: open %d, want FMOD_ERR_FORMAT", res);
+        if (res == FMOD_OK) {
+            close_file(&file);
+        }
+        fake_file_init(&file, buf, sizeof(buf));
+        file.failAtPos = FMOD_ERR_NET_SOCKET_ERROR;
+        file.failPos   = 100000;
+        res = open_file(&file, 0);
+        CHECK(res == FMOD_ERR_NET_SOCKET_ERROR,
+              "socket error at the first byte past a 100 KB ID3v2 tag: open %d, want FMOD_ERR_NET_SOCKET_ERROR", res);
         if (res == FMOD_OK) {
             close_file(&file);
         }
