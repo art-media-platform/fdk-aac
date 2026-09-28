@@ -30,24 +30,27 @@ modified (see [Changes to the FDK AAC Codec](#changes-to-the-fdk-aac-codec)).
 FMOD 2.03 ends a stream at the length its codec declares at open: it plays on to that length when the
 codec's data ends sooner, cuts the tail when the data runs longer, and never asks for the length again. So:
 
-- **Length:** M4A declares its exact length (for a truncated file, the length of the access units it
-  holds). An ADTS open walks the frame headers of the stream's first 128 KiB (the bytes FMOD buffers before
-  READY at a 128 KiB stream buffer). Its 100 ms budget is checked every 16 frames, between reads that can
-  each wait up to FMOD's network timeout on a still-arriving stream, and a transport fault in the walk ends
-  the open. A stream that ends inside them declares its exact length, unless its sampling rate or profile
-  changes on the way (the walk stops there); a longer one declares an unknown length, so FMOD ends it at the decoder's end of stream. Its
-  running estimate is published as the tag `AMPAAC_LENGTH_MS` (`FMOD_TAGTYPE_USER`, 32-bit integer), from
-  the mean frame size of the frames known so far, and becomes exact at the end: a 90 s VBR speech file with
-  a quiet opening estimates 97 s at open (the probe's 8 KB alone gave 126 s). A stream without a size gets
-  no walk and no estimate. With `FMOD_ACCURATETIME`, ADTS reads a sized stream whole at open and declares its
-  exact length; a stream without a size is not walked.
-- **Seeking:** M4A seeks are sample-exact: decoding restarts 8 access units ahead of the target (xHE-AAC:
-  from the sync sample at or before that point) and drops the pre-roll output. An ADTS seek to within
-  256 KiB of the nearest known frame walks frame headers forward, for up to 100 ms and at most 256 KiB, and lands exactly
+- **Length:** M4A declares its exact length (for a truncated file, the length of the access units it holds).
+  An ADTS open walks the frame headers of the stream's first 128 KiB (the bytes FMOD buffers before READY at a
+  128 KiB stream buffer). Its 100 ms budget is checked every 16 frames, between reads that can each wait up to
+  FMOD's network timeout on a still-arriving stream, and a transport fault in the walk ends the open. A stream
+  that ends inside them declares its exact length, unless its sampling rate or profile changes on the way (the
+  walk stops there); a longer one declares an unknown length, so FMOD ends it at the decoder's end of stream.
+  Its running estimate is published as the tag `AMPAAC_LENGTH_MS` (`FMOD_TAGTYPE_USER`, 32-bit integer), from
+  the mean frame size of the frames known so far, and becomes exact at the end: a 90 s VBR speech file with a
+  quiet opening estimates 97 s at open (the probe's 8 KB alone gave 126 s). A stream without a size gets no
+  walk and no estimate. The walk needs a server with Range support: it reads past what FMOD can rewind without
+  one, and the rewind that follows is a seek. Measured on FMOD 2.03.14: a sized ADTS stream from a server that
+  does not advertise `Accept-Ranges` fails its open with `FMOD_ERR_FILE_COULDNOTSEEK`. With
+  `FMOD_ACCURATETIME`, ADTS reads a sized stream whole at open and declares its exact length; a stream without
+  a size is not walked.
+- **Seeking:** M4A seeks are sample-exact: decoding restarts 8 access units ahead of the target (xHE-AAC: from
+  the sync sample at or before that point) and drops the pre-roll output. An ADTS seek to within 256 KiB of
+  the nearest known frame walks frame headers forward, for up to 100 ms and at most 256 KiB, and lands exactly
   wherever the walk reaches. A farther target, or one past the budget, is estimated from the mean frame size
   (close for CBR, approximate for VBR), so a netstream's first request after the seek is for the target's
-  bytes: a walk's read on a still-arriving stream would wait for them, and its budget cannot cut a read
-  short. `FMOD_ACCURATETIME` indexes the whole stream at open, so every seek lands exactly.
+  bytes: a walk's read on a still-arriving stream would wait for them, and its budget cannot cut a read short.
+  `FMOD_ACCURATETIME` indexes the whole stream at open, so every seek lands exactly.
 - **Sample-rate changes** (implicit SBR found after open) arrive as FMOD's `Sample Rate Change` FLOAT tag.
 - **Netstreams** (measured on FMOD 2.03.14 against a Range server):
   - At open FMOD reads each file's tail: a Range from `floor((size − 128) / 2048) × 2048` to the end
@@ -114,14 +117,14 @@ MPEG 2400. Priority 1000 places ampaac after WAV (measured: between 500 and 700)
 codecs, which cannot netstream AAC. Formats tried after ampaac pay its probe: an MP3 open over HTTP made 6
 requests instead of 4. FMOD then rewinds the stream for its next codec. A server without Range support is
 rewound only inside the sound's file buffer (`FMOD_CREATESOUNDEXINFO::filebuffersize`, 2 KiB by default), and
-ampaac reads through up to 4 ID3v2 tags (up to 256 KiB each), then up to 8 KiB, before it rejects a stream: unhinted, a live MP3 without Range failed to open
-(`FMOD_ERR_FILE_COULDNOTSEEK`). Hint the codec for content you know is not AAC
-(`FMOD_CREATESOUNDEXINFO::suggestedsoundtype`, e.g. `FMOD_SOUND_TYPE_MPEG`): FMOD tries it first, and an AAC
-stream hinted MPEG still opens through ampaac. A larger file buffer also opens the live MP3, but it moves
-FMOD's tail read at open to `floor((size - 128) / buffer) * buffer`. FMOD for Unity's C# wrapper has no
-`registerCodec`: P/Invoke `FMOD5_System_RegisterCodec(IntPtr system, IntPtr description, out uint handle,
-uint priority)` from FMOD's library, and `AMPAAC_GetCodecDescription` from `ampaac` (`__Internal` on iOS,
-where `libampaac.a` links into the app).
+ampaac reads through up to 4 ID3v2 tags (up to 256 KiB each), then up to 8 KiB, before it rejects a stream:
+unhinted, a live MP3 without Range failed to open (`FMOD_ERR_FILE_COULDNOTSEEK`). Hint the codec for content
+you know is not AAC (`FMOD_CREATESOUNDEXINFO::suggestedsoundtype`, e.g. `FMOD_SOUND_TYPE_MPEG`): FMOD tries it
+first, and an AAC stream hinted MPEG still opens through ampaac. A larger file buffer also opens the live MP3,
+but it moves FMOD's tail read at open to `floor((size - 128) / buffer) * buffer`. FMOD for Unity's C# wrapper
+has no `registerCodec`: P/Invoke `FMOD5_System_RegisterCodec(IntPtr system, IntPtr description, out uint
+handle, uint priority)` from FMOD's library, and `AMPAAC_GetCodecDescription` from `ampaac` (`__Internal` on
+iOS, where `libampaac.a` links into the app).
 
 ## Building
 
