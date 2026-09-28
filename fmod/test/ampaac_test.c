@@ -1561,6 +1561,45 @@ static void test_audit_round3(void) {
     CHECK(fake_live_allocations() == 0, "audit round 3: %ld allocations leaked", fake_live_allocations());
 }
 
+/* Audit round 4: FMOD_ACCURATETIME near FMOD's 32-bit PCM positions. 4,194,303 AAC-LC frames (27 h at 44.1 kHz) end
+   at 2^32 - 1024 samples, and the decoder's lead (1,685 samples) takes the end the decode pads to past 2^32: an exact
+   length must leave that end unwrapped. One frame more meets the walk's 2^32 guard itself. */
+static void test_audit_round4(void) {
+    blob         one      = load("adts_lc_44k_silence.aac");
+    unsigned int frameLen = ((one.data[3] & 3u) << 11) | ((unsigned int)one.data[4] << 3) | (one.data[5] >> 5);
+    unsigned int counts[2] = { 4194303u, 4194304u };
+    unsigned int c;
+
+    for (c = 0; c < 2; c++) {
+        unsigned int   size = counts[c] * frameLen;
+        unsigned char* big  = (unsigned char*)malloc(size);
+        fake_file      file;
+        FMOD_RESULT    res;
+        unsigned int   i;
+
+        for (i = 0; i < counts[c]; i++) {
+            memcpy(big + (size_t)i * frameLen, one.data, frameLen);
+        }
+        fake_file_init(&file, big, size);
+        res = open_file(&file, FMOD_ACCURATETIME);
+        CHECK(res == FMOD_OK, "ACCURATETIME over %u LC frames: open %d", counts[c], res);
+        if (res == FMOD_OK) {
+            ampaac_codec* aac = (ampaac_codec*)file.state.plugindata;
+
+            printf("  ACCURATETIME over %u LC frames (%u B): exact %d, length %u, lead %u, end %u, declared %u\n",
+                   counts[c], size, aac->lengthExact, aac->lengthPcm, aac->leadPcm, aac->endPcm,
+                   file.state.waveformat->lengthpcm);
+            CHECK(!aac->lengthExact || (unsigned long long)aac->lengthPcm + aac->leadPcm == aac->endPcm,
+                  "ACCURATETIME over %u LC frames: exact length %u + lead %u, end %u (the end wrapped)",
+                  counts[c], aac->lengthPcm, aac->leadPcm, aac->endPcm);
+            close_file(&file);
+        }
+        free(big);
+    }
+    free(one.data);
+    CHECK(fake_live_allocations() == 0, "audit round 4: %ld allocations leaked", fake_live_allocations());
+}
+
 /* A decode loop that never ends must fail the run, not hang it. */
 static void on_watchdog(int sig) {
     static const char msg[] = "  FAIL watchdog: the tests ran past 600 s (a loop that does not end)\n";
@@ -1597,6 +1636,7 @@ int main(int argc, char** argv) {
     test_far_seek();
     test_length_estimate();
     test_audit_round3();
+    test_audit_round4();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
