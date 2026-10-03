@@ -15,7 +15,9 @@ modified (see [Changes to the FDK AAC Codec](#changes-to-the-fdk-aac-codec)).
   goes through the same decoder path; no fixture covers it yet.
 - **Containers:** ADTS (`.aac`), including ID3v2 prefixes and streams that start mid-frame (ICY captures);
   MP4/M4A with `moov` before or after `mdat`, within the first 64 top-level boxes. Fragmented MP4 is
-  rejected.
+  rejected. An MP4 audio track must have one sample description, ordered chunk runs that cover every
+  declared sample, and a valid sync-sample table when present. Files requiring sample-description
+  switching are rejected. A truncated media body still decodes its complete access units.
 - **Output:** 16-bit PCM in WAV channel order: 1, 2 or 6 channels. A 3–5 channel stream opens as 5.1 with
   the missing channels silent; fdk's mixer downmixes 7 and 8 channels to 5.1 (its default output limit is 6).
   The count is pinned at open, so a mid-stream layout change cannot change FMOD's format.
@@ -95,6 +97,8 @@ codec's data ends sooner, cuts the tail when the data runs longer, and never ask
   finds no frame in 1 MiB (over a hundred maximum-size frames; not logged). These ends read as a normal end
   of file, leave the length an estimate, and a later seek past them plays.
 - **Memory:** the codec's state and tables come from FMOD's allocator; fdk's decoder calls `calloc`.
+  The reader and PCM carry are reused across reads. ADTS keeps at most 4,096 seek anchors (32 KiB);
+  MP4 retains its `moov` (at most 32 MiB) and four bytes per access-unit offset (at most 32 MiB).
 - **Stack:** a decode peaks near 50 KB of stack (`make test` measures it over the nine mono and stereo fixtures
   and a 3- and a 5-channel one: 49,768 bytes on arm64, 49,848 on x86_64; fdk's frame decoder alone takes 35.9 KB).
   FMOD's default STREAM (96 KiB) and NONBLOCKING (112 KiB) thread stacks hold that with under 2× headroom on
@@ -189,6 +193,20 @@ Windows DLL), exports, stack protection, embedded paths, and a revision stamp eq
 - `test/fmod_harness.c` — drives a real FMOD library with the codec registered: open, play, seek, length,
   pause, and a System release during an open or a seek; its header lists the settings.
 - `test/make_fixtures.py` — regenerates `test/fixtures/` (macOS `afconvert`).
+
+## AAC Encoding Assessment
+
+AAC encoding is feasible with the encoder already present in this repository. FMOD's [codec API](https://www.fmod.com/docs/2.03/api/plugin-api-codec.html) reads compressed audio and returns PCM; it has no encoder or compressed-output callback. Encoding therefore needs a PCM source and an encoder API alongside the decoder plugin.
+
+For recording a channel or the mixed output, attach a native pass-through DSP to that channel or channel group. Its callback copies PCM into a preallocated queue; a worker converts the floats to interleaved `INT_PCM`, calls `aacEncEncode`, and writes the encoded bytes. FMOD's [DSP audio callbacks run on the mixer thread](https://www.fmod.com/docs/2.03/api/dsp-plugin-api-guide.html#thread-safety), so encoding, allocation, locks, file writes and network writes belong on the worker. The AMP client's `av.FMOD/native~/tap.cpp` already demonstrates the copy-and-queue pattern. Its visualization queue has one consumer: an encoder needs its own queue or an explicit fan-out, and must report any dropped PCM rather than silently shortening a recording. Capture the intended signal: a channel tap records that channel; a master-group tap records the mix after preceding DSPs.
+
+An optional companion library keeps encoder code out of playback-only builds and preserves the decoder's existing entry points. It needs `libAACenc`, `libMpegTPEnc`, `libSBRenc`, `libSACenc` and the shared `libFDK`, `libPCMutils`, `libSYS` modules, with the same architecture, symbol visibility, stack protection and binary checks. Export a small C API for configuration, PCM input, packet output, draining and close. Hide FDK symbols as the decoder does, including in the iOS prelinked archive. Keep each encoder instance and its input/output buffers owned by one worker; query `aacEncInfo` for frame size, output capacity, configuration bytes and delay.
+
+Start with mono/stereo AAC-LC at the capture rate, normally 44.1 or 48 kHz. LC uses 1,024 input frames per packet (23.2 or 21.3 ms respectively); that packet duration excludes encoder delay, FMOD buffering and queue latency. HE-AAC and HE-AACv2 are available for lower bitrates; the encoder's AOT switch does not support xHE-AAC/USAC. Afterburner trades CPU for quality; choose it from measurements on the slowest supported device. FMOD's float PCM must be checked for nonfinite values, scaled and clipped to the library's signed integer range, with explicit channel ordering. A capture-rate or channel-layout change needs resampling/remapping or a new encoded segment, rather than changing an established file's format silently. These are implementation choices, not measured encoder performance claims.
+
+ADTS output is the smaller first implementation for streaming or `.aac` recordings, but it cannot preserve exact priming and padding. For sample-aligned recordings, request raw access units plus the AudioSpecificConfig and add an MP4/M4A muxer. FDK generates AAC packets, not MP4 files; this repository's MP4 reader is not a muxer. Track the input-frame total and the encoder's delay fields, finish partial input, drain until `AACENC_ENCODE_EOF`, and write matching gapless metadata. The encoder and its [API documentation](../libAACenc/include/aacenc_lib.h) provide the packet and delay information.
+
+Acceptance should cover encode/decode round trips, channel order, clipping, variable input block sizes, exact M4A presentation length, ADTS output, partial-final-frame draining, concurrent playback, queue overflow, cancellation and device format changes. Measure worker CPU, queue occupancy, memory, added library size and mixer callback time on target devices. Adding a PCM capture/worker with ADTS output is a moderate extension; reliable M4A output adds muxing and gapless accounting. The recommendation is an optional AAC-LC encoder with native capture, then M4A support when sample-aligned recording is required. Encoding is assessed here and is not implemented by the decoder build.
 
 ## Licensing
 

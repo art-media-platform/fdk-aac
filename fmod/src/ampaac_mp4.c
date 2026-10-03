@@ -82,10 +82,10 @@ static int read_descriptor(const unsigned char** p, const unsigned char* end, un
         b    = *(*p)++;
         *len = (*len << 7) | (b & 0x7F);
         if (!(b & 0x80)) {
-            break;
+            return *len <= (unsigned int)(end - *p);
         }
     }
-    return *len <= (unsigned int)(end - *p);
+    return 0;
 }
 
 /* esds → objectTypeIndication + AudioSpecificConfig. */
@@ -151,7 +151,7 @@ static int parse_sample_entry(const box* stsd, ampaac_mp4* mp4) {
     unsigned int         version;
     unsigned int         skip = 28;
 
-    if (stsd->size < 8 || be32(stsd->data + 4) == 0) {
+    if (stsd->size < 8 || be32(stsd->data + 4) != 1) {
         return 0;
     }
     cursor = stsd->data + 8;
@@ -278,11 +278,30 @@ static int build_offsets(ampaac_codec* aac, const box* stsc, const box* stco, in
     unsigned int sample = 0;
     unsigned int run;
 
-    if (count == 0 || count > SAMPLE_CAP
+    if (count == 0 || count > SAMPLE_CAP || runs == 0 || chunks == 0
         || stsc->size < 8 + (unsigned long long)runs * 12
         || stco->size < 8 + (unsigned long long)chunks * chunkBytes
         || (uniform == 0 && stsz->size < 12 + (unsigned long long)count * 4)) {
         return 0;
+    }
+    /* One configured sample description; chunk runs must cover the sample table in order. */
+    {
+        unsigned long long mapped = 0;
+        for (run = 0; run < runs; run++) {
+            const unsigned char* r = stsc->data + 8 + run * 12;
+            unsigned int first = be32(r);
+            unsigned int next = run + 1 < runs ? be32(r + 12) : chunks + 1;
+            unsigned int perChunk = be32(r + 4);
+
+            if ((run == 0 && first != 1) || first == 0 || first > chunks || next <= first
+                || next > chunks + 1 || perChunk == 0 || be32(r + 8) != 1) {
+                return 0;
+            }
+            mapped += (unsigned long long)(next - first) * perChunk;
+        }
+        if (mapped != count) {
+            return 0;
+        }
     }
     mp4->sizes      = uniform ? NULL : stsz->data + 12;
     mp4->uniform    = uniform;
@@ -297,16 +316,13 @@ static int build_offsets(ampaac_codec* aac, const box* stsc, const box* stco, in
         unsigned int last = run + 1 < runs ? be32(r + 12) - 1 : chunks;
         unsigned int chunk;
 
-        if (first == 0 || last > chunks || perChunk == 0) {
-            break;
-        }
         for (chunk = first; chunk <= last && sample < count; chunk++) {
             unsigned long long offset = co64 ? be64(stco->data + 8 + (chunk - 1) * 8)
                                              : be32(stco->data + 8 + (chunk - 1) * 4);
             unsigned int       n;
             for (n = 0; n < perChunk && sample < count; n++) {
                 unsigned int size = uniform ? uniform : be32(mp4->sizes + sample * 4);
-                if (offset + size > AMPAAC_UNKNOWN || size == 0 || size > AMPAAC_MAX_AU
+                if (size == 0 || size > AMPAAC_MAX_AU || offset > AMPAAC_UNKNOWN - size
                     || (aac->reader.size != AMPAAC_UNKNOWN && offset + size > aac->reader.size)) {
                     mp4->samples = sample;   /* stop at the first unusable sample (truncated file) */
                     return sample > 0;
@@ -356,10 +372,23 @@ static int parse_track(ampaac_codec* aac, const box* trak) {
     if (stco.size < 8 || !build_offsets(aac, &stsc, &stco, co64, &stsz)) {
         return 0;
     }
-    if (find_box(stbl.data, stbl.size, FOURCC('s', 't', 's', 's'), &stss) && stss.size >= 8
-        && stss.size >= 8 + (unsigned long long)be32(stss.data + 4) * 4) {
+    if (find_box(stbl.data, stbl.size, FOURCC('s', 't', 's', 's'), &stss)) {
+        unsigned int previous = 0;
+        unsigned int entry;
+
+        if (stss.size < 8
+            || stss.size < 8 + (unsigned long long)be32(stss.data + 4) * 4) {
+            return 0;
+        }
         mp4->sync      = stss.data + 8;
         mp4->syncCount = be32(stss.data + 4);
+        for (entry = 0; entry < mp4->syncCount; entry++) {
+            unsigned int sample = be32(mp4->sync + entry * 4);
+            if (sample <= previous || sample > be32(stsz.data + 8)) {
+                return 0;
+            }
+            previous = sample;
+        }
     }
     if (find_box(trak->data, trak->size, FOURCC('e', 'd', 't', 's'), &edts)
         && find_box(edts.data, edts.size, FOURCC('e', 'l', 's', 't'), &elst)) {
@@ -567,7 +596,7 @@ FMOD_RESULT ampaac_mp4_seek(ampaac_codec* aac, unsigned int targetPcm) {
         au = mp4->samples ? mp4->samples - 1 : 0;
     }
     start = au > AMPAAC_PREROLL_AUS ? au - AMPAAC_PREROLL_AUS : 0;
-    if (mp4->usac && mp4->sync && mp4->syncCount > 0) {
+    if (mp4->usac && mp4->sync) {
         /* The last sync sample at or before start (entries are 1-based and ascending). */
         unsigned int lo = 0;
         unsigned int hi = mp4->syncCount;

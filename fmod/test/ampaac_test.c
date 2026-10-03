@@ -1342,14 +1342,154 @@ static unsigned char* find_bytes(unsigned char* data, unsigned int size, const c
     return NULL;
 }
 
-/* Audit round 3 (2026-09-27): a transport fault inside the open walk, the seek walk's byte cap, a rate change inside
+static void put_be32(unsigned char* into, unsigned int value) {
+    into[0] = (unsigned char)(value >> 24);
+    into[1] = (unsigned char)(value >> 16);
+    into[2] = (unsigned char)(value >> 8);
+    into[3] = (unsigned char)value;
+}
+
+/* Exercise the container before decoder probing can hide an invalid table as an AAC decode failure. */
+static void expect_mp4_error(const char* what, const blob* src) {
+    fake_file     file;
+    ampaac_codec* aac = (ampaac_codec*)calloc(1, sizeof(*aac));
+    FMOD_RESULT   res;
+
+    fake_file_init(&file, src->data, src->size);
+    ampaac_reader_init(&aac->reader, &file.state);
+    res = ampaac_mp4_open(aac);
+    CHECK(res == FMOD_ERR_FORMAT, "%s: container open %d, want FMOD_ERR_FORMAT", what, res);
+    ampaac_mp4_close(aac);
+    free(aac);
+    CHECK(fake_live_allocations() == 0, "%s: %ld allocations leaked", what, fake_live_allocations());
+}
+
+static void test_mp4_tables(void) {
+    static const struct { const char* box; unsigned int offset; unsigned int value; const char* what; } cases[] = {
+        { "stsd", 8,  2, "multiple sample descriptions" },
+        { "stsc", 12, 2, "first chunk is not one" },
+        { "stsc", 16, 21, "chunk mapping omits samples" },
+        { "stsc", 20, 2, "chunk uses another sample description" },
+    };
+    blob src = load("m4a_lc_44k_stereo.m4a");
+    blob changed = { (unsigned char*)malloc(src.size), src.size };
+    unsigned char* table;
+    unsigned int i;
+
+    printf("mp4 tables\n");
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        memcpy(changed.data, src.data, src.size);
+        table = find_bytes(changed.data, changed.size, cases[i].box, 4);
+        CHECK(table != NULL, "%s: fixture table missing", cases[i].what);
+        if (table) {
+            put_be32(table + cases[i].offset, cases[i].value);
+            expect_mp4_error(cases[i].what, &changed);
+        }
+    }
+
+    memcpy(changed.data, src.data, src.size);
+    table = find_bytes(changed.data, changed.size, "esds", 4);
+    CHECK(table != NULL, "fixture esds missing");
+    if (table) {
+        table[12] |= 0x80;   /* all four descriptor-length bytes continue */
+        expect_mp4_error("unterminated descriptor length", &changed);
+    }
+
+    memcpy(changed.data, src.data, src.size);
+    table = find_bytes(changed.data, changed.size, "stco", 4);
+    CHECK(table != NULL, "fixture stco missing");
+    if (table) {
+        memcpy(table, "co64", 4);
+        put_be32(table + 8, 1);
+        unsigned char* mapping = find_bytes(changed.data, changed.size, "stsc", 4);
+        unsigned char* sizes = find_bytes(changed.data, changed.size, "stsz", 4);
+        memcpy(mapping + 16, sizes + 12, 4);   /* one chunk holds every sample */
+        memset(table + 12, 0xFF, 8);
+        table[19] = 0xFE;   /* UINT64_MAX - 1: adding the first AU's size must not wrap */
+        expect_mp4_error("co64 offset overflow", &changed);
+    }
+
+    /* The fixture's stts has room for two stss entries. Timing is learned from the decoder. */
+    for (i = 0; i < 4; i++) {
+        memcpy(changed.data, src.data, src.size);
+        table = find_bytes(changed.data, changed.size, "stts", 4);
+        CHECK(table != NULL, "fixture stts missing");
+        if (table) {
+            memcpy(table, "stss", 4);
+            put_be32(table + 8, i == 3 ? 5 : 2);
+            put_be32(table + 12, i == 0 ? 0 : 2);
+            put_be32(table + 16, i == 1 ? 1 : 1000);
+            expect_mp4_error(i == 0 ? "zero sync sample" : i == 1 ? "unordered sync samples"
+                             : i == 2 ? "sync sample past end" : "truncated sync table", &changed);
+        }
+    }
+    /* A valid two-run mapping, then a duplicate first_chunk; reuse the existing boxes' space. */
+    {
+        fake_file file;
+        FMOD_RESULT res;
+        unsigned char* offsets;
+        unsigned char* mapping;
+
+        memcpy(changed.data, src.data, src.size);
+        offsets = find_bytes(changed.data, changed.size, "stsc", 4);
+        mapping = find_bytes(changed.data, changed.size, "stco", 4);
+        CHECK(offsets && mapping, "fixture chunk tables missing");
+        if (offsets && mapping) {
+            memcpy(offsets, "stco", 4);
+            put_be32(offsets + 8, 2);
+            memcpy(offsets + 12, mapping + 12, 4);
+            memcpy(offsets + 16, mapping + 24, 4);   /* AU 66 starts at the original fourth chunk */
+            memcpy(mapping, "stsc", 4);
+            put_be32(mapping + 8, 2);
+            put_be32(mapping + 12, 1);
+            put_be32(mapping + 16, 66);
+            put_be32(mapping + 20, 1);
+            put_be32(mapping + 24, 2);
+            put_be32(mapping + 28, 66);
+            put_be32(mapping + 32, 1);
+            fake_file_init(&file, changed.data, changed.size);
+            res = open_file(&file, 0);
+            CHECK(res == FMOD_OK, "valid two-run mapping: open %d", res);
+            if (res == FMOD_OK) {
+                decoded out;
+                res = read_all(&file, 4096, &out);
+                CHECK(res == FMOD_OK && out.frames == 3u * 44100u, "two-run mapping: %d, %u frames", res, out.frames);
+                check_tones(&out, "two-run mapping");
+                free(out.pcm);
+                close_file(&file);
+            }
+            put_be32(mapping + 24, 1);
+            expect_mp4_error("duplicate chunk run", &changed);
+        }
+    }
+    /* No sync entries means USAC must rebuild from the start, rather than choose a non-sync AU. */
+    {
+        ampaac_codec* aac = (ampaac_codec*)calloc(1, sizeof(*aac));
+        unsigned char sync[8] = { 0, 0, 0, 1, 0, 0, 0, 20 };
+        aac->frameSize = 1024;
+        aac->mp4.samples = 132;
+        aac->mp4.usac = 1;
+        aac->mp4.sync = sync;
+        CHECK(ampaac_mp4_seek(aac, 50u * 1024u) == FMOD_OK && aac->mp4.next == 0,
+              "empty sync table: seek chose AU %u", aac->mp4.next);
+        aac->mp4.syncCount = 2;
+        CHECK(ampaac_mp4_seek(aac, 50u * 1024u) == FMOD_OK && aac->mp4.next == 19,
+              "USAC sync seek chose AU %u, want 19", aac->mp4.next);
+        free(aac);
+    }
+    free(changed.data);
+    free(src.data);
+    CHECK(fake_live_allocations() == 0, "mp4 tables: %ld allocations leaked", fake_live_allocations());
+}
+
+/* A transport fault inside the open walk, the seek walk's byte cap, a rate change inside
    a short ADTS, a 64-bit M4A trim field, the reader across a 4 GiB wrap, ACCURATETIME without a size, and a fault
    inside an ID3v2 tag. */
-static void test_audit_round3(void) {
+static void test_stream_boundaries(void) {
     fake_file   file;
     FMOD_RESULT res;
 
-    printf("audit round 3\n");
+    printf("stream boundaries\n");
 
     /* A transport fault inside the open's header walk ends the open as it is. The walk passes the reader's 16 KiB
        window, so the rewind after it reaches FMOD, and must not erase the fault. */
@@ -1558,13 +1698,13 @@ static void test_audit_round3(void) {
         }
     }
 
-    CHECK(fake_live_allocations() == 0, "audit round 3: %ld allocations leaked", fake_live_allocations());
+    CHECK(fake_live_allocations() == 0, "stream boundaries: %ld allocations leaked", fake_live_allocations());
 }
 
-/* Audit round 4: FMOD_ACCURATETIME near FMOD's 32-bit PCM positions. 4,194,303 AAC-LC frames (27 h at 44.1 kHz) end
+/* FMOD_ACCURATETIME near FMOD's 32-bit PCM positions. 4,194,303 AAC-LC frames (27 h at 44.1 kHz) end
    at 2^32 - 1024 samples, and the decoder's lead (1,685 samples) takes the end the decode pads to past 2^32: an exact
    length must leave that end unwrapped. One frame more meets the walk's 2^32 guard itself. */
-static void test_audit_round4(void) {
+static void test_pcm_range(void) {
     blob         one      = load("adts_lc_44k_silence.aac");
     unsigned int frameLen = ((one.data[3] & 3u) << 11) | ((unsigned int)one.data[4] << 3) | (one.data[5] >> 5);
     unsigned int counts[2] = { 4194303u, 4194304u };
@@ -1597,7 +1737,7 @@ static void test_audit_round4(void) {
         free(big);
     }
     free(one.data);
-    CHECK(fake_live_allocations() == 0, "audit round 4: %ld allocations leaked", fake_live_allocations());
+    CHECK(fake_live_allocations() == 0, "PCM range: %ld allocations leaked", fake_live_allocations());
 }
 
 /* A decode loop that never ends must fail the run, not hang it. */
@@ -1635,8 +1775,9 @@ int main(int argc, char** argv) {
     test_rate_restart();
     test_far_seek();
     test_length_estimate();
-    test_audit_round3();
-    test_audit_round4();
+    test_mp4_tables();
+    test_stream_boundaries();
+    test_pcm_range();
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

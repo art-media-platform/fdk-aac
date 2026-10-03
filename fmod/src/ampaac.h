@@ -152,8 +152,6 @@ typedef struct ampaac_codec {
     /* ADTS */
     unsigned int          dataStart;     /* file offset of the first frame */
     ampaac_adts_header    adtsFirst;     /* the first frame's header: a walk stops where the rate or profile changes */
-    unsigned long long    feedBytes;     /* bytes of frames fed while exact, for the mean frame size */
-    unsigned int          feedFrames;
     unsigned int          meanFrameBytes;
     unsigned int          pcmPerFrame;   /* output PCM frames per ADTS frame (frameSize * raw blocks) */
     ampaac_index_entry*   index;
